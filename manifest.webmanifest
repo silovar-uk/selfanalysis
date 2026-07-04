@@ -1,22 +1,12 @@
 {
-  "name": "Evidence Ledger｜実績台帳",
-  "short_name": "実績台帳",
+  "name": "selfanalysis｜実績台帳",
+  "short_name": "selfanalysis",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#0d2142",
-  "theme_color": "#0d2142",
+  "background_color": "#f4f7fb",
+  "theme_color": "#0b1f3a",
   "icons": [
-    {
-      "src": "assets/evidence-ledger-icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "assets/evidence-ledger-icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any"
-    }
+    {"src":"assets/selfanalysis-icon-192.png","sizes":"192x192","type":"image/png"},
+    {"src":"assets/selfanalysis-icon-512.png","sizes":"512x512","type":"image/png"}
   ]
 }

@@ -3,19 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0d2142" />
-    <meta name="description" content="実績・能力・条件を根拠ベースで蓄積する個人用台帳" />
-    <link rel="icon" type="image/png" sizes="32x32" href="assets/evidence-ledger-icon-32.png" />
-    <link rel="icon" type="image/png" sizes="192x192" href="assets/evidence-ledger-icon-192.png" />
-    <link rel="apple-touch-icon" sizes="180x180" href="assets/evidence-ledger-icon-180.png" />
+    <meta name="theme-color" content="#0b1f3a" />
+    <meta name="description" content="事実・証拠・条件を積み上げて、自分の実績を後から検証できる個人用台帳" />
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/selfanalysis-icon-32.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="assets/selfanalysis-icon-192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/selfanalysis-icon-180.png" />
     <link rel="manifest" href="manifest.webmanifest" />
-    <title>Evidence Ledger｜実績台帳</title>
+    <title>selfanalysis｜実績台帳</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <a class="skip-link" href="#app-main">本文へ移動</a>
-    <div id="app" class="app-shell" aria-live="polite"></div>
-    <div id="toast-region" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
+    <div id="app" class="app-shell"></div>
+    <div id="modal-root"></div>
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
     <script type="module" src="app.js"></script>
   </body>
 </html>

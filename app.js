@@ -1,1191 +1,1160 @@
-import { PERSONAL_SEED_RECORDS, PERSONAL_SEED_MANIFEST } from './sample-data.js';
+import { SAMPLE_RECORDS } from './sample-data.js';
+import { SKILL_CATEGORIES, SKILL_QUESTIONS, SKILL_STATUSES, SKILL_QUESTION_COUNT } from './skill-questions.js';
 
-const APP_NAME = 'Evidence Ledger';
-const DB_NAME = 'evidence-ledger-db';
-const DB_VERSION = 1;
+const INITIAL_SAMPLE_COUNT = SAMPLE_RECORDS.length;
+const APP_VERSION = 'v05';
+
+const DB_NAME = 'selfanalysis-db';
+const DB_VERSION = 3;
 const RECORD_STORE = 'records';
-const HISTORY_STORE = 'history';
+const SNAPSHOT_STORE = 'snapshots';
+const SKILL_ANSWER_STORE = 'skillAnswers';
+const SKILL_SESSION_KEY = 'selfanalysis-skill-session-v2';
+const LEGACY_SKILL_SESSION_KEY = 'selfanalysis-skill-session-v1';
+const CLEAR = '__CLEAR__';
 
-const TYPES = ['実例', '能力・知識', '習慣', '気づき', '苦手・反証'];
-const RECORD_STATUSES = ['事実', '自己観察', '仮説'];
+const STATUS = ['事実', '自己観察', '仮説'];
+const TYPES = ['実例', '能力・知識', '習慣', '性質', 'できないこと・制約', '趣味'];
 const DOMAINS = ['仕事', '私生活', '学習', '人間関係', '健康', '趣味'];
 const FREQUENCIES = ['単発', 'ときどき', '継続中', '繰り返し'];
-const PRESENTATION_USES = ['まだ使わない', '候補', '使う'];
-const DEADLINES = ['未記録', '余裕あり', '期限あり', '短納期', '当日対応'];
-const AUTONOMIES = ['未記録', '低い', '中程度', '高い'];
-const STAKEHOLDER_SCALES = ['未記録', '自分中心', '少人数', '複数部署', '社外含む'];
-const UNCERTAINTIES = ['未記録', '定型', '例外あり', '前例なし'];
-const CONDITION_OPTIONS = ['裁量あり', '目的が明確', '判断期限あり', '決裁者が明確', '数字が見える', '文章化が必要', '現場運用あり', '関係者が多い', '利害が衝突', '前例なし', '制作・表現を扱う', '技術・仕組みを扱う'];
-const AXES = [
-  ['dataAxis', '数字・データ'],
-  ['meaningAxis', '言葉・文脈'],
-  ['peopleAxis', '人・利害'],
-  ['operationsAxis', '現場運用'],
-  ['creativeAxis', '制作・表現'],
-  ['technicalAxis', '技術・仕組み'],
-];
-
-const root = document.getElementById('app');
-const toastRegion = document.getElementById('toast-region');
-
-const state = {
-  view: 'inbox',
-  records: [],
-  activeRecordId: null,
-  draft: null,
-  filters: {
-    query: '', type: 'すべて', domain: 'すべて', evidence: 'すべて', status: 'すべて', order: '最近更新',
-  },
-  collapsedSections: new Set(),
-  outputSelection: new Set(),
-  outputInitialized: false,
-  outputFormat: 'interview',
-  importMode: 'append',
-  importText: '',
-  importPreview: null,
-  importColumnMap: null,
-  importHeaders: [],
-  modal: null,
+const INTERVIEW = ['まだ使わない', '候補', '使う'];
+const CAPABILITY = ['未検証', '支援があればできる', '定型なら一人でできる', '例外があっても進められる', '人に教える／仕組みにできる'];
+const SCORE_LABELS = {
+  enjoyment: ['かなり嫌い', 'やや嫌い', 'どちらでもない', 'やや好き', 'かなり好き'],
+  fatigue: ['低い', 'やや低い', '普通', 'やや高い', '高い'],
+};
+const AXIS_LABELS = {
+  dataHandling: '数字・データ',
+  meaningHandling: '言葉・文脈',
+  peopleHandling: '人・利害',
+  operations: '現場運用',
+  creation: '制作・表現',
+  technology: '技術・仕組み',
 };
 
-function uid() {
-  return crypto?.randomUUID?.() || `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-function now() { return new Date().toISOString(); }
-function clone(value) { return JSON.parse(JSON.stringify(value)); }
-function escapeHTML(value = '') {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-function safeText(value = '') { return escapeHTML(value).replaceAll('\n', '<br>'); }
-function dateLabel(value) {
-  if (!value) return '未記録';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat('ja-JP', { month: 'numeric', day: 'numeric' }).format(date);
-}
-function localDateTime(value) {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date);
-}
-function normalizeKey(value = '') {
-  return String(value).trim().toLowerCase().replace(/[\s　_\-・\/]/g, '');
-}
-function normalizeTags(text = '') {
-  const raw = Array.isArray(text) ? text : String(text).split(/[|｜,，、\n]/);
-  return [...new Set(raw.map(x => x.trim()).filter(Boolean))];
-}
-function evidenceLines(value = '') {
-  return String(value).split('\n').map(x => x.trim()).filter(Boolean);
-}
-function evidenceCount(record) { return evidenceLines(record.evidenceText).length; }
-function selectedUseClass(value) {
-  if (value === '候補') return 'candidate';
-  if (value === '使う') return 'use';
-  return '';
-}
-function displayCapability(value) {
-  return ['未検証', '支援があればできる', '定型なら一人でできる', '例外があっても進められる', '人に教える／仕組みにできる'][Number(value) || 0] || '未記録';
-}
-function displayScaleValue(value, labels) {
-  return labels[Number(value) - 1] || '未記録';
-}
-function countTruthy(record, keys) {
-  return keys.filter(key => Number(record.reflection?.[key] || 0) > 0).length;
-}
+const TSV_COLUMNS = [
+  ['__id', 'id'], ['__seed', 'seedId'], ['記録の扱い', 'status'], ['タイトル', 'title'], ['種類', 'type'], ['領域', 'domain'], ['一言要約', 'summary'], ['タグ', 'tags'], ['頻度', 'frequency'], ['最終実施日', 'lastDone'], ['何をしたか', 'what'], ['いつ・どこで', 'where'], ['自分の役割', 'role'], ['関係者', 'stakeholders'], ['結果・変化', 'result'], ['証拠・具体例', 'evidence'], ['紐づくID', 'linkedIds'], ['期限', 'deadline'], ['裁量', 'autonomy'], ['関係者の広さ', 'stakeholderScope'], ['不確実性', 'uncertainty'], ['条件タグ', 'conditions'], ['好き度', 'enjoyment'], ['消耗度', 'fatigue'], ['扱える範囲', 'capability'], ['数字・データ', 'dataHandling'], ['言葉・文脈', 'meaningHandling'], ['人・利害', 'peopleHandling'], ['現場運用', 'operations'], ['制作・表現', 'creation'], ['技術・仕組み', 'technology'], ['振り返りメモ', 'reflection'], ['反証・うまくいかなかった条件', 'counterEvidence'], ['次に試すこと・代替策', 'nextExperiment'], ['次に試すこと', 'nextExperiment'], ['面接での利用', 'interviewUse'], ['一言で言うと', 'oneLiner'], ['再現できる条件', 'reproducibleConditions'], ['他社でも通じる言い換え', 'translation'], ['応募先・用途タグ', 'useTags'],
+];
 
-function defaultRecord(overrides = {}) {
-  const timestamp = now();
-  return {
-    id: uid(),
-    seedKey: '',
-    recordStatus: '事実',
-    title: '',
-    type: '実例',
-    domain: '仕事',
-    summary: '',
-    tags: [],
-    frequency: '単発',
-    lastPracticedAt: '',
-    fact: { what: '', when: '', role: '', stakeholders: '', result: '' },
-    evidenceText: '',
-    linkedRecordIds: [],
-    conditions: {
-      deadline: '未記録', autonomy: '未記録', stakeholderScale: '未記録', uncertainty: '未記録', attributes: [],
-    },
-    reflection: {
-      enjoyment: 0, depletion: 0, capability: 0,
-      dataAxis: 0, meaningAxis: 0, peopleAxis: 0, operationsAxis: 0, creativeAxis: 0, technicalAxis: 0,
-      notes: '', counterEvidence: '', nextExperiment: '',
-    },
-    presentation: {
-      use: 'まだ使わない', oneLiner: '', reusableConditions: '', translation: '', companyTags: [],
-    },
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    ...overrides,
-  };
-}
+const HEADER_ALIASES = new Map([
+  ['id', 'id'], ['__id', 'id'], ['ID', 'id'], ['タイトル', 'title'], ['title', 'title'], ['種類', 'type'], ['分類', 'type'], ['領域', 'domain'], ['記録の扱い', 'status'], ['扱い', 'status'], ['一言要約', 'summary'], ['内容', 'summary'], ['タグ', 'tags'], ['頻度', 'frequency'], ['最終実施日', 'lastDone'], ['何をしたか', 'what'], ['いつ・どこで', 'where'], ['自分の役割', 'role'], ['関係者', 'stakeholders'], ['結果・変化', 'result'], ['証拠・具体例', 'evidence'], ['証拠', 'evidence'], ['条件タグ', 'conditions'], ['好き度', 'enjoyment'], ['消耗度', 'fatigue'], ['扱える範囲', 'capability'], ['得意度', 'capability'], ['数字・データ', 'dataHandling'], ['言葉・文脈', 'meaningHandling'], ['人・利害', 'peopleHandling'], ['現場運用', 'operations'], ['制作・表現', 'creation'], ['技術・仕組み', 'technology'], ['振り返りメモ', 'reflection'], ['反証・うまくいかなかった条件', 'counterEvidence'], ['次に試すこと・代替策', 'nextExperiment'], ['次に試すこと', 'nextExperiment'], ['面接での利用', 'interviewUse'], ['一言で言うと', 'oneLiner'], ['再現できる条件', 'reproducibleConditions'], ['他社でも通じる言い換え', 'translation'], ['応募先・用途タグ', 'useTags'], ['期限', 'deadline'], ['裁量', 'autonomy'], ['関係者の広さ', 'stakeholderScope'], ['不確実性', 'uncertainty'], ['紐づくID', 'linkedIds'], ['__seed', 'seedId'],
+]);
 
-function normalizeRecord(record) {
-  const base = defaultRecord({ id: record?.id || uid(), createdAt: record?.createdAt || now() });
-  const merged = {
-    ...base,
-    ...record,
-    fact: { ...base.fact, ...(record?.fact || {}) },
-    conditions: { ...base.conditions, ...(record?.conditions || {}) },
-    reflection: { ...base.reflection, ...(record?.reflection || {}) },
-    presentation: { ...base.presentation, ...(record?.presentation || {}) },
-  };
-  merged.tags = normalizeTags(merged.tags);
-  merged.seedKey = String(merged.seedKey || '').trim();
-  if (!RECORD_STATUSES.includes(merged.recordStatus)) merged.recordStatus = '事実';
-  merged.linkedRecordIds = Array.isArray(merged.linkedRecordIds) ? merged.linkedRecordIds : [];
-  merged.conditions.attributes = Array.isArray(merged.conditions.attributes) ? merged.conditions.attributes : [];
-  merged.presentation.companyTags = normalizeTags(merged.presentation.companyTags);
-  for (const key of ['enjoyment', 'depletion', 'capability', ...AXES.map(([key]) => key)]) {
-    merged.reflection[key] = Math.max(0, Math.min(key === 'capability' ? 5 : key === 'enjoyment' || key === 'depletion' ? 5 : 3, Number(merged.reflection[key]) || 0));
-  }
-  merged.updatedAt = record?.updatedAt || base.updatedAt;
+const state = {
+  db: null,
+  tab: 'inbox',
+  records: [],
+  filters: { search: '', status: '', type: '', domain: '', interviewUse: '', sort: 'updated' },
+  selected: new Set(),
+  importPreview: null,
+  lastSnapshotId: null,
+  skillAnswers: new Map(),
+  skill: { sessionIds: [], index: 0, memoOpenQuestionId: '', outputFormat: 'markdown', outputFilter: 'all', tempo: 'stay', sessionName: '', lastAnswered: null },
+};
+
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const uid = () => (crypto?.randomUUID?.() || `r-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+const now = () => new Date().toISOString();
+const shortDate = (value) => value ? new Intl.DateTimeFormat('ja-JP', { month: 'numeric', day: 'numeric' }).format(new Date(value)) : '—';
+const escape = (value = '') => String(value).replace(/[&<>'"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#039;', '"': '&quot;' })[ch]);
+const nl2br = (value = '') => escape(value).replace(/\n/g, '<br>');
+const toArray = (value) => Array.isArray(value) ? value.filter(Boolean) : String(value || '').split('|').map((x) => x.trim()).filter(Boolean);
+const toInt = (value, max = 5) => { const n = Number(value); return Number.isFinite(n) && n >= 0 && n <= max ? n : null; };
+const statusClass = (status) => status === '事実' ? 'status-fact' : status === '自己観察' ? 'status-observation' : 'status-hypothesis';
+const recordDefaults = () => ({
+  id: uid(), seedId: '', status: '事実', title: '', type: '実例', domain: '仕事', summary: '', tags: [], frequency: '単発', lastDone: '',
+  what: '', where: '', role: '', stakeholders: '', result: '', evidence: '', linkedIds: [], deadline: '', autonomy: '', stakeholderScope: '', uncertainty: '', conditions: [],
+  enjoyment: null, fatigue: null, capability: null, dataHandling: null, meaningHandling: null, peopleHandling: null, operations: null, creation: null, technology: null,
+  reflection: '', counterEvidence: '', nextExperiment: '', interviewUse: 'まだ使わない', oneLiner: '', reproducibleConditions: '', translation: '', useTags: [], createdAt: now(), updatedAt: now(), isSample: false,
+});
+
+function normalizeRecord(input = {}) {
+  const base = recordDefaults();
+  const merged = { ...base, ...input };
+  if (merged.type === '失敗・苦手') merged.type = 'できないこと・制約';
+  ['tags', 'linkedIds', 'conditions', 'useTags'].forEach((key) => { merged[key] = toArray(merged[key]); });
+  ['enjoyment', 'fatigue', 'capability'].forEach((key) => { merged[key] = toInt(merged[key], 5); });
+  Object.keys(AXIS_LABELS).forEach((key) => { merged[key] = toInt(merged[key], 3); });
+  if (!merged.createdAt) merged.createdAt = now();
+  if (!merged.updatedAt) merged.updatedAt = now();
   return merged;
 }
 
-// IndexedDB ------------------------------------------------------------------
-let dbPromise;
 function openDB() {
-  if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(RECORD_STORE)) db.createObjectStore(RECORD_STORE, { keyPath: 'id' });
-      if (!db.objectStoreNames.contains(HISTORY_STORE)) db.createObjectStore(HISTORY_STORE, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(SNAPSHOT_STORE)) db.createObjectStore(SNAPSHOT_STORE, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(SKILL_ANSWER_STORE)) db.createObjectStore(SKILL_ANSWER_STORE, { keyPath: 'questionId' });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
-  return dbPromise;
 }
-async function dbGetAll(storeName) {
-  const db = await openDB();
+function tx(storeName, mode = 'readonly') { return state.db.transaction(storeName, mode).objectStore(storeName); }
+function requestToPromise(request) { return new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }); }
+async function getAllRecords() { return requestToPromise(tx(RECORD_STORE).getAll()); }
+async function putRecord(record) { return requestToPromise(tx(RECORD_STORE, 'readwrite').put(record)); }
+async function deleteRecord(id) { return requestToPromise(tx(RECORD_STORE, 'readwrite').delete(id)); }
+async function replaceAllRecords(records) {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readonly');
-    const request = tx.objectStore(storeName).getAll();
-    request.onsuccess = () => resolve(request.result || []);
-    request.onerror = () => reject(request.error);
-  });
-}
-async function dbPut(storeName, value) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readwrite');
-    tx.objectStore(storeName).put(value);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-async function dbDelete(storeName, id) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readwrite');
-    tx.objectStore(storeName).delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-async function dbReplaceAllRecords(records) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(RECORD_STORE, 'readwrite');
-    const store = tx.objectStore(RECORD_STORE);
+    const transaction = state.db.transaction(RECORD_STORE, 'readwrite');
+    const store = transaction.objectStore(RECORD_STORE);
     store.clear();
-    records.forEach(record => store.put(record));
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    records.forEach((record) => store.put(record));
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
   });
 }
-async function saveSnapshot(action, before) {
-  const history = { id: uid(), type: 'snapshot', action, createdAt: now(), before: clone(before) };
-  await dbPut(HISTORY_STORE, history);
-  return history;
+async function makeSnapshot(label) {
+  const snapshot = { id: uid(), label, createdAt: now(), records: structuredClone(state.records) };
+  await requestToPromise(tx(SNAPSHOT_STORE, 'readwrite').put(snapshot));
+  state.lastSnapshotId = snapshot.id;
+  return snapshot;
 }
-async function getLatestSnapshot() {
-  const rows = await dbGetAll(HISTORY_STORE);
-  return rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
+async function getSnapshot(id) { return requestToPromise(tx(SNAPSHOT_STORE).get(id)); }
+
+function skillAnswerDefaults(questionId) { return { questionId, status: '', note: '', guidedSupport: [], pins: [], updatedAt: now() }; }
+function normalizeSkillAnswer(input = {}) {
+  const base = skillAnswerDefaults(input.questionId || '');
+  return {
+    ...base,
+    ...input,
+    guidedSupport: [...new Set(toArray(input.guidedSupport))],
+    pins: [...new Set(toArray(input.pins))],
+  };
+}
+async function getAllSkillAnswers() { return requestToPromise(tx(SKILL_ANSWER_STORE).getAll()); }
+async function putSkillAnswer(answer) { return requestToPromise(tx(SKILL_ANSWER_STORE, 'readwrite').put(normalizeSkillAnswer(answer))); }
+async function deleteSkillAnswer(questionId) { return requestToPromise(tx(SKILL_ANSWER_STORE, 'readwrite').delete(questionId)); }
+function skillAnswer(questionId) { return normalizeSkillAnswer(state.skillAnswers.get(questionId) || skillAnswerDefaults(questionId)); }
+function persistSkillSession() {
+  try {
+    localStorage.setItem(SKILL_SESSION_KEY, JSON.stringify({
+      sessionIds: state.skill.sessionIds,
+      index: state.skill.index,
+      tempo: state.skill.tempo,
+      sessionName: state.skill.sessionName,
+      lastAnswered: state.skill.lastAnswered,
+      outputFormat: state.skill.outputFormat,
+      outputFilter: state.skill.outputFilter,
+    }));
+  } catch {}
+}
+function restoreSkillSession() {
+  try {
+    const raw = localStorage.getItem(SKILL_SESSION_KEY) || localStorage.getItem(LEGACY_SKILL_SESSION_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const validIds = new Set(SKILL_QUESTIONS.map((q) => q.id));
+    const ids = Array.isArray(parsed.sessionIds) ? parsed.sessionIds.filter((id) => validIds.has(id)) : [];
+    state.skill = {
+      ...state.skill,
+      sessionIds: ids,
+      index: ids.length ? Math.max(0, Math.min(Number(parsed.index) || 0, ids.length - 1)) : 0,
+      tempo: parsed.tempo === 'fast' ? 'fast' : 'stay',
+      sessionName: typeof parsed.sessionName === 'string' ? parsed.sessionName : '',
+      lastAnswered: parsed.lastAnswered?.questionId ? parsed.lastAnswered : null,
+      outputFormat: parsed.outputFormat === 'text' ? 'text' : 'markdown',
+      outputFilter: ['all', 'ready', 'usable', 'pinned', 'constraints'].includes(parsed.outputFilter) ? parsed.outputFilter : 'all',
+    };
+  } catch {}
 }
 
-// Sample data ----------------------------------------------------------------
-function sampleRecords() {
-  return PERSONAL_SEED_RECORDS.map(record => normalizeRecord(clone(record)));
+function refreshRecords() {
+  return getAllRecords().then((records) => {
+    state.records = records.map(normalizeRecord).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    render();
+  });
 }
 
-// Render ---------------------------------------------------------------------
-function navButton(view, icon, label) {
-  const active = (state.view === view || (view === 'ledger' && state.view === 'detail')) ? 'is-active' : '';
-  return `<button class="nav-button ${active}" data-view="${view}"><span class="nav-icon" aria-hidden="true">${icon}</span><span>${label}</span></button>`;
+function toast(message, tone = '') {
+  const root = $('#toast-region');
+  const node = document.createElement('div');
+  node.className = `toast ${tone}`;
+  node.textContent = message;
+  root.append(node);
+  setTimeout(() => node.remove(), 3400);
 }
-function mobileButton(view, icon, label) {
-  const active = (state.view === view || (view === 'ledger' && state.view === 'detail')) ? 'is-active' : '';
-  return `<button class="${active}" data-view="${view}"><span aria-hidden="true">${icon}</span><span>${label}</span></button>`;
+
+function button(label, action, options = {}) {
+  const cls = ['button', options.variant || 'ghost', options.small ? 'small' : '', options.full ? 'full' : ''].filter(Boolean).join(' ');
+  const attrs = [action ? `data-action="${action}"` : '', options.id ? `data-id="${escape(options.id)}"` : '', options.extra ? options.extra : '', options.type ? `type="${options.type}"` : 'type="button"'].filter(Boolean).join(' ');
+  return `<button class="${cls}" ${attrs}>${escape(label)}</button>`;
 }
-function appChrome(content) {
-  const existingSeeds = new Set(state.records.map(record => record.seedKey).filter(Boolean));
-  const remainingSeeds = PERSONAL_SEED_RECORDS.filter(record => !existingSeeds.has(record.seedKey)).length;
-  const sampleLabel = remainingSeeds ? `初期台帳を追加（${remainingSeeds}件）` : '初期台帳を追加済';
+function badge(text, cls = '') { return `<span class="badge ${cls}">${escape(text)}</span>`; }
+function tags(tags) { return toArray(tags).slice(0, 8).map((tag) => `<span class="tag">${escape(tag)}</span>`).join(''); }
+
+function navigation() {
+  const nav = [
+    ['inbox', '受信箱'], ['skills', 'スキルチェック'], ['ledger', '台帳'], ['organize', '整理'], ['discover', '発見'], ['output', '出力'], ['data', 'データ'],
+  ];
+  const make = (mobile = false) => nav.filter(([, label]) => !mobile || ['inbox', 'ledger', 'organize', 'data'].includes(label === '受信箱' ? 'inbox' : label === '台帳' ? 'ledger' : label === '整理' ? 'organize' : label === 'データ' ? 'data' : '')).map(([id, label]) => `<button class="nav-button ${state.tab === id ? 'active' : ''}" data-tab="${id}">${label}</button>`).join('');
+  // Explicit mobile buttons to avoid fragile label mapping.
+  const mobile = [['inbox','記録'],['skills','チェック'],['ledger','一覧'],['data','その他']].map(([id,label]) => `<button class="nav-button ${state.tab === id ? 'active' : ''}" data-tab="${id}">${label}</button>`).join('');
   return `
     <header class="app-header">
       <div class="header-inner">
-        <a href="#" class="brand" data-view="inbox" aria-label="実績台帳の受信箱へ">
-          <img class="brand-mark" src="assets/evidence-ledger-icon-64.png" width="34" height="34" alt="" />
-          <span class="brand-copy"><strong>Evidence Ledger</strong><span>事実を残し、後から検証する</span></span>
-        </a>
-        <div class="header-actions">
-          <button class="secondary-button" data-action="sample" ${remainingSeeds ? '' : 'disabled'} title="${escapeHTML(PERSONAL_SEED_MANIFEST.description)}">${sampleLabel}</button>
-          <button class="primary-button" data-action="new-record">＋ 記録する</button>
-        </div>
+        <button class="brand" type="button" data-tab="inbox" aria-label="受信箱へ">
+          <img src="assets/selfanalysis-icon-64.png" alt="" />
+          <span class="brand-copy"><strong>selfanalysis</strong><span>実績・証拠・条件の台帳</span></span>
+        </button>
+        <nav class="primary-nav" aria-label="主な画面">${make()}</nav>
+        <div class="header-actions">${button('＋ 記録', 'new-record', { variant: 'primary' })}</div>
       </div>
     </header>
-    <div class="layout">
-      <aside class="sidebar">
-        <nav class="sidebar-nav" aria-label="主な機能">
-          ${navButton('inbox', '＋', '受信箱')}
-          ${navButton('ledger', '▤', '台帳')}
-          ${navButton('organize', '✓', '整理')}
-          ${navButton('discover', '⌁', '発見')}
-          ${navButton('output', '↗', '出力')}
-          ${navButton('data', '⇄', 'データ')}
-        </nav>
-        <p class="sidebar-note">まずは事実を残す。<br>評価や面接用の言い換えは、あとから足す。</p>
-      </aside>
-      <main id="app-main" class="main">${content}</main>
-    </div>
-    <nav class="mobile-nav" aria-label="モバイルナビゲーション">
-      ${mobileButton('inbox', '＋', '記録')}
-      ${mobileButton('ledger', '▤', '一覧')}
-      ${mobileButton('organize', '✓', '整理')}
-      ${mobileButton('data', '⋯', 'その他')}
-    </nav>
-    ${state.modal ? renderModal() : ''}
-  `;
+  ` + `<nav class="mobile-nav" aria-label="モバイルナビ">${mobile}</nav>`;
 }
 
-function render() {
-  const content = {
-    inbox: renderInbox,
-    ledger: renderLedger,
-    detail: renderDetail,
-    organize: renderOrganize,
-    discover: renderDiscover,
-    output: renderOutput,
-    data: renderData,
-  }[state.view]?.() || renderInbox();
-  root.innerHTML = appChrome(content);
-  bindEvents();
+function heading(title, subtitle, actions = '') {
+  return `<div class="page-heading"><div><h1>${escape(title)}</h1><p>${escape(subtitle)}</p></div><div class="page-heading-actions">${actions}</div></div>`;
 }
 
-function renderInbox() {
-  const records = state.records;
-  const complete = records.filter(r => evidenceCount(r) > 0).length;
-  const candidates = records.filter(r => r.presentation?.use !== 'まだ使わない').length;
-  const used = records.filter(r => r.presentation?.use === '使う').length;
-  const recent = [...records].sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 5);
-  return `
-    <section class="page-head">
-      <div><h1>受信箱</h1><p>思いついた事実を先に残す。分類や評価は、後からで大丈夫。</p></div>
-    </section>
-    <section class="inbox-card section">
-      <h2>何を残す？</h2>
-      <p>実際にやったこと、知っていること、気づいたこと。弱そうでも、まず保管。</p>
-      <form id="quick-entry-form">
-        <div class="quick-entry"><input id="quick-title" name="title" autocomplete="off" placeholder="例：関係者12人の進行をまとめた" aria-label="残す内容" required><button type="submit">事実メモとして保存</button></div>
-        <div class="quick-options">
-          <label>領域 <select id="quick-domain" name="domain" style="padding:3px 6px;border:0;border-radius:6px"><option>仕事</option><option>私生活</option><option>学習</option><option>人間関係</option><option>健康</option><option>趣味</option></select></label>
-          <label>種類 <select id="quick-type" name="type" style="padding:3px 6px;border:0;border-radius:6px"><option>実例</option><option>能力・知識</option><option>習慣</option><option>気づき</option><option>苦手・反証</option></select></label>
-        </div>
-      </form>
-    </section>
-    <section class="section">
-      <div class="stat-grid">
-        <div class="stat"><strong>${records.length}</strong><span>記録した事実</span></div>
-        <div class="stat"><strong>${complete}</strong><span>証拠を足した記録</span></div>
-        <div class="stat"><strong>${candidates}</strong><span>面接の候補</span></div>
-        <div class="stat"><strong>${used}</strong><span>いま使う素材</span></div>
-      </div>
-    </section>
-    <section class="section">
-      <div class="section-title"><h2>迷ったときの入口</h2><p>「強み」ではなく、具体的な出来事を残す。</p></div>
-      <div class="suggestion-grid">
-        <button class="suggestion" data-suggestion="英語の記事を読んで要点を整理した"><b>読んだ・調べた</b><span>英語、記事、専門知識、比較したこと</span></button>
-        <button class="suggestion" data-suggestion="関係者の多い案件で、確認事項を整理した"><b>進めた・調整した</b><span>企画、進行、合意形成、当日運用</span></button>
-        <button class="suggestion" data-suggestion="うまくいかなかった条件に気づいた"><b>つまずいた・学んだ</b><span>消耗した条件、反証、次に試すこと</span></button>
-      </div>
-    </section>
-    <section class="section">
-      <div class="section-title"><h2>最近の記録</h2><button class="ghost-button" data-view="ledger">台帳を見る →</button></div>
-      ${recent.length ? `<div class="record-list">${recent.map(renderRecordCard).join('')}</div>` : renderEmpty('まだ記録がない', 'まずは上の入力欄に、思い出した事実をひとつだけ入れる。', 'new-record', '最初の記録をつくる')}
-    </section>
-  `;
-}
-
-function renderEmpty(title, text, action, label) {
-  return `<div class="card empty"><h3>${escapeHTML(title)}</h3><p>${escapeHTML(text)}</p><button class="primary-button" data-action="${action}">${escapeHTML(label)}</button></div>`;
-}
-function recordBadges(record) {
-  const bits = [`<span class="chip type">${escapeHTML(record.type)}</span>`, `<span class="chip domain">${escapeHTML(record.domain)}</span>`];
-  if (record.recordStatus && record.recordStatus !== '事実') bits.push(`<span class="chip ${record.recordStatus === '仮説' ? 'warning' : ''}">${escapeHTML(record.recordStatus)}</span>`);
-  if (evidenceCount(record)) bits.push(`<span class="chip">証拠 ${evidenceCount(record)}件</span>`);
-  if (record.presentation?.use && record.presentation.use !== 'まだ使わない') bits.push(`<span class="chip ${selectedUseClass(record.presentation.use)}">面接：${escapeHTML(record.presentation.use)}</span>`);
-  if (!record.summary) bits.push(`<span class="chip warning">要約未整理</span>`);
-  return bits.join('');
-}
-function renderRecordCard(record) {
-  const summary = record.summary || record.fact?.what || '詳細を開いて、事実や証拠を足す';
-  return `<article class="card record-card" data-record-id="${record.id}">
+function recordCard(record, options = {}) {
+  const evidenceCount = [record.evidence, record.result, record.lastDone].filter(Boolean).length;
+  const badges = [
+    badge(record.status, statusClass(record.status)),
+    badge(record.type), badge(record.domain),
+    evidenceCount ? badge(`証拠 ${evidenceCount}件`) : badge('証拠未入力', 'alert'),
+    record.interviewUse !== 'まだ使わない' ? badge(`面接：${record.interviewUse}`, 'interview') : '',
+  ].join(' ');
+  const checked = state.selected.has(record.id) ? 'checked' : '';
+  return `<article class="record-card" data-record-card="${escape(record.id)}">
     <div class="record-card-top">
       <div>
-        <h3 class="record-card-title">${escapeHTML(record.title || '無題の記録')}</h3>
-        <p class="record-card-summary">${safeText(summary)}</p>
+        <h3 class="record-title">${escape(record.title || '無題の記録')}</h3>
+        ${record.summary ? `<p class="record-summary">${escape(record.summary)}</p>` : ''}
       </div>
-      <div class="record-actions">
-        <button class="small-button" data-action="open-record" data-record-id="${record.id}">開く</button>
-        <button class="small-button" data-action="duplicate-record" data-record-id="${record.id}">複製</button>
-      </div>
+      <div>${options.selectable ? `<label class="badge"><input type="checkbox" data-select-record="${escape(record.id)}" ${checked}/> 選択</label>` : button('開く', 'open-record', { id: record.id, small: true })}</div>
     </div>
-    <div class="record-meta">${recordBadges(record)}${record.tags.slice(0,6).map(tag => `<span class="chip">#${escapeHTML(tag)}</span>`).join('')}<span class="muted" style="font-size:11px;margin-left:auto">更新 ${dateLabel(record.updatedAt)}</span></div>
+    <div class="record-meta">${badges}</div>
+    ${record.tags?.length ? `<div class="tag-row">${tags(record.tags)}</div>` : ''}
+    <div class="record-foot"><span>更新 ${shortDate(record.updatedAt)}</span><span>${record.frequency || '頻度未整理'}</span></div>
   </article>`;
 }
 
-function renderLedger() {
-  const records = getFilteredRecords();
+function inboxView() {
+  const facts = state.records.filter((r) => r.status === '事実').length;
+  const evidence = state.records.filter((r) => r.evidence || r.result).length;
+  const initialAction = state.records.length ? '' : button(`初期台帳${INITIAL_SAMPLE_COUNT}件を追加`, 'seed-sample', { variant: 'secondary' });
+  const recent = state.records.slice(0, 6);
   return `
-    <section class="page-head">
-      <div><h1>台帳</h1><p>実例・能力・習慣・気づきを横断して探す。評価より、根拠と条件を優先。</p></div>
-      <div class="button-row"><button class="secondary-button" data-action="export-filtered">表示中をTSV</button><button class="primary-button" data-action="new-record">＋ 記録する</button></div>
+    ${heading('受信箱', 'まずは、評価せずに事実を残す。詳しい整理はあとでよい。', initialAction)}
+    <section class="card hero">
+      <h2>何を残す？</h2>
+      <p>実績、学んだこと、できないこと、うまくいかなかったこと、仕事外で続いていること。弱そうに見える話でも、まず事実として置く。</p>
+      <form id="quick-capture" class="quick-form">
+        <input class="input" name="title" required maxlength="140" placeholder="例：英語記事を読んで要点を日本語で整理した" aria-label="記録のタイトル" />
+        <select class="select" name="domain" aria-label="領域">${DOMAINS.map((x) => `<option>${x}</option>`).join('')}</select>
+        <button class="button primary" type="submit">事実メモとして保存</button>
+      </form>
+      <p class="help">保存後に、証拠・条件・振り返りを足せる。ここでは「得意か」「面接で使えるか」を決めなくてよい。</p>
     </section>
-    <section class="card section">
-      <div class="filter-bar">
-        <input data-filter="query" value="${escapeHTML(state.filters.query)}" placeholder="タイトル・内容・タグを検索" aria-label="台帳を検索">
-        ${renderSelect('type', state.filters.type, ['すべて', ...TYPES], '種類')}
-        ${renderSelect('domain', state.filters.domain, ['すべて', ...DOMAINS], '領域')}
-        ${renderSelect('evidence', state.filters.evidence, ['すべて', '証拠あり', '証拠なし', '面接候補', '未整理'], '状態')}
-        ${renderSelect('status', state.filters.status || 'すべて', ['すべて', ...RECORD_STATUSES], '記録の扱い')}
-        ${renderSelect('order', state.filters.order, ['最近更新', '作成順', '証拠が多い', '好き度', '扱える範囲'], '並び替え')}
+    <section class="grid grid-4" style="margin-top:16px">
+      <div class="card kpi"><div class="kpi-value">${state.records.length}</div><div class="kpi-label">記録数</div><div class="kpi-note">まずは量。評価は後から。</div></div>
+      <div class="card kpi"><div class="kpi-value">${facts}</div><div class="kpi-label">事実として記録</div><div class="kpi-note">実際にやったこと・起きたこと。</div></div>
+      <div class="card kpi"><div class="kpi-value">${evidence}</div><div class="kpi-label">証拠あり</div><div class="kpi-note">数値、制作物、URL、案件名。</div></div>
+      <div class="card kpi"><div class="kpi-value">${state.records.filter((r) => r.interviewUse === '使う').length}</div><div class="kpi-label">面接で使う候補</div><div class="kpi-note">提示用は、台帳と別レイヤー。</div></div>
+    </section>
+    <section class="grid grid-2" style="margin-top:16px">
+      <div class="card card-pad">
+        <div class="section-heading"><h2>最近の記録</h2>${button('台帳へ', 'go-ledger', { small: true })}</div>
+        <div class="list">${recent.length ? recent.map(recordCard).join('') : `<div class="empty">まだ記録がない。上の入力欄に、今日あったことを一つ残してみる。</div>`}</div>
       </div>
-    </section>
-    <section class="section">
-      <div class="section-title"><h2>${records.length}件の記録</h2><p>カードを開くと、事実・証拠・条件・振り返りを編集できる。</p></div>
-      ${records.length ? `<div class="record-list">${records.map(renderRecordCard).join('')}</div>` : renderEmpty('条件に合う記録がない', '検索や絞り込みを変えるか、新しい記録を追加する。', 'new-record', '記録を追加')}
-    </section>
-  `;
-}
-function renderSelect(filter, selected, options, label) {
-  return `<select data-filter="${filter}" aria-label="${label}">${options.map(option => `<option ${option === selected ? 'selected' : ''}>${escapeHTML(option)}</option>`).join('')}</select>`;
-}
-function getFilteredRecords() {
-  const query = state.filters.query.trim().toLowerCase();
-  const result = state.records.filter(record => {
-    const haystack = [record.title, record.summary, record.fact?.what, record.fact?.role, record.evidenceText, record.tags.join(' '), record.conditions?.attributes?.join(' '), record.conditions?.deadline, record.conditions?.autonomy, record.conditions?.stakeholderScale, record.conditions?.uncertainty, record.presentation?.oneLiner, record.recordStatus].join(' ').toLowerCase();
-    if (query && !haystack.includes(query)) return false;
-    if (state.filters.type !== 'すべて' && record.type !== state.filters.type) return false;
-    if (state.filters.domain !== 'すべて' && record.domain !== state.filters.domain) return false;
-    if (state.filters.evidence === '証拠あり' && evidenceCount(record) === 0) return false;
-    if (state.filters.evidence === '証拠なし' && evidenceCount(record) > 0) return false;
-    if (state.filters.evidence === '面接候補' && record.presentation?.use === 'まだ使わない') return false;
-    if (state.filters.evidence === '未整理' && record.summary && record.fact?.what) return false;
-    if ((state.filters.status || 'すべて') !== 'すべて' && record.recordStatus !== state.filters.status) return false;
-    return true;
-  });
-  const sorter = {
-    '最近更新': (a,b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-    '作成順': (a,b) => new Date(b.createdAt) - new Date(a.createdAt),
-    '証拠が多い': (a,b) => evidenceCount(b) - evidenceCount(a),
-    '好き度': (a,b) => (b.reflection?.enjoyment || 0) - (a.reflection?.enjoyment || 0),
-    '扱える範囲': (a,b) => (b.reflection?.capability || 0) - (a.reflection?.capability || 0),
-  }[state.filters.order];
-  return result.sort(sorter);
+      <div class="card card-pad">
+        <div class="section-heading"><h2>残し方のヒント</h2></div>
+        <div class="progress-list">
+          <div class="progress-row"><span>仕事で手を動かしたこと</span><strong>例：会議の論点を整理した</strong></div>
+          <div class="progress-row"><span>知識を得た・使ったこと</span><strong>例：英語記事を比較した</strong></div>
+          <div class="progress-row"><span>条件が見えたこと</span><strong>例：短納期だと消耗しやすい</strong></div>
+          <div class="progress-row"><span>できないこと・制約</span><strong>例：車の運転を移動前提に置かない</strong></div>
+          <div class="progress-row"><span>反証・失敗</span><strong>例：決裁者不明で進まなかった</strong></div>
+        </div>
+        <div class="notice" style="margin-top:14px">「答えがない」ことは、課題から降りる理由ではない。目的と判断基準を仮置きし、検証できる記録として残す。</div>
+      </div>
+    </section>`;
 }
 
-function renderDetail() {
-  const draft = state.draft || defaultRecord();
-  const isNew = !state.records.some(record => record.id === draft.id);
-  const allOtherRecords = state.records.filter(record => record.id !== draft.id);
-  return `
-    <section class="page-head">
-      <div><button class="ghost-button" data-action="back-ledger">← 台帳へ戻る</button><h1 style="margin-top:8px">${isNew ? '新しい記録' : escapeHTML(draft.title || '無題の記録')}</h1><p>事実を先に。評価と面接向けの言い換えは、必要なところだけ後から足す。</p></div>
-      <div class="button-row"><button class="danger-button" data-action="delete-record" ${isNew ? 'disabled' : ''}>削除</button><button class="primary-button" data-action="save-record">保存する</button></div>
-    </section>
-    <section class="detail-layout">
-      <form id="detail-form" class="card detail-form" novalidate>
-        ${renderDetailCore(draft)}
-        ${renderFactSection(draft)}
-        ${renderEvidenceSection(draft, allOtherRecords)}
-        ${renderConditionsSection(draft)}
-        ${renderReflectionSection(draft)}
-        ${renderPresentationSection(draft)}
-      </form>
-      <aside class="detail-aside">
-        <div class="card sidebar-summary">
-          <div class="key-value"><span>記録の状態</span><strong>${isNew ? 'まだ保存していない' : '保存済み'}</strong></div>
-          <div class="key-value"><span>記録の扱い</span><strong>${escapeHTML(draft.recordStatus || '事実')}</strong></div>
-          <div class="key-value"><span>証拠</span><strong>${evidenceCount(draft)}件</strong></div>
-          <div class="key-value"><span>面接利用</span><strong>${escapeHTML(draft.presentation?.use || 'まだ使わない')}</strong></div>
-          <div class="key-value"><span>最終更新</span><strong>${localDateTime(draft.updatedAt)}</strong></div>
-          <hr style="border:0;border-top:1px solid var(--line);width:100%;margin:2px 0">
-          <p class="help-text">保存前に画面を閉じると、入力中の内容は残らない。長文はまず「事実」として保存してから整える。</p>
-          <button class="secondary-button" data-action="save-record">保存する</button>
-        </div>
-      </aside>
-    </section>
-  `;
+function filteredRecords() {
+  const f = state.filters;
+  const q = f.search.trim().toLowerCase();
+  const rows = state.records.filter((r) => {
+    const hay = [r.title, r.summary, r.tags.join(' '), r.evidence, r.what, r.oneLiner].join('\n').toLowerCase();
+    const inSubset = !state._subset || state._subset.rows.includes(r.id);
+    return inSubset && (!q || hay.includes(q)) && (!f.status || r.status === f.status) && (!f.type || r.type === f.type) && (!f.domain || r.domain === f.domain) && (!f.interviewUse || r.interviewUse === f.interviewUse);
+  });
+  return rows.sort((a, b) => {
+    if (f.sort === 'created') return new Date(b.createdAt) - new Date(a.createdAt);
+    if (f.sort === 'evidence') return scoreEvidence(b) - scoreEvidence(a);
+    if (f.sort === 'enjoyment') return (b.enjoyment || -1) - (a.enjoyment || -1);
+    if (f.sort === 'capability') return (b.capability || -1) - (a.capability || -1);
+    return new Date(b.updatedAt) - new Date(a.updatedAt);
+  });
 }
-function sectionWrapper(key, title, description, content, open = true) {
-  const collapsed = state.collapsedSections.has(key);
-  return `<section class="form-section ${collapsed ? 'is-collapsed' : ''}" data-section="${key}">
-    <button type="button" class="section-toggle" data-action="toggle-section" data-section="${key}"><span><h2>${title}</h2><p>${description}</p></span><span class="chev">⌄</span></button>
-    <div class="form-section-content">${content}</div>
+function scoreEvidence(r) { return [r.evidence, r.result, r.lastDone, r.where, r.role].filter(Boolean).length; }
+function selectOptions(list, selected, label = 'すべて') { return `<option value="">${label}</option>${list.map((x) => `<option value="${escape(x)}" ${x === selected ? 'selected' : ''}>${escape(x)}</option>`).join('')}`; }
+
+function ledgerView() {
+  const rows = filteredRecords();
+  const f = state.filters;
+  return `${heading('台帳', '根拠を検索し、必要な記録を開いて育てる。', button('＋ 詳しく記録', 'new-record', { variant: 'primary' }))}
+    <section class="card toolbar">
+      <input class="input grow" data-filter="search" value="${escape(f.search)}" placeholder="タイトル、タグ、証拠から検索" />
+      <button class="button secondary" data-action="clear-filters">絞り込みを解除</button>
+      <div class="filter-grid" style="width:100%">
+        <select class="select" data-filter="status">${selectOptions(STATUS, f.status, '扱い：すべて')}</select>
+        <select class="select" data-filter="type">${selectOptions(TYPES, f.type, '種類：すべて')}</select>
+        <select class="select" data-filter="domain">${selectOptions(DOMAINS, f.domain, '領域：すべて')}</select>
+        <select class="select" data-filter="interviewUse">${selectOptions(INTERVIEW, f.interviewUse, '面接利用：すべて')}</select>
+        <select class="select" data-filter="sort"><option value="updated" ${f.sort === 'updated' ? 'selected' : ''}>更新順</option><option value="created" ${f.sort === 'created' ? 'selected' : ''}>作成順</option><option value="evidence" ${f.sort === 'evidence' ? 'selected' : ''}>証拠が多い順</option><option value="capability" ${f.sort === 'capability' ? 'selected' : ''}>扱える範囲順</option><option value="enjoyment" ${f.sort === 'enjoyment' ? 'selected' : ''}>好き度順</option></select>
+      </div>
+    </section>
+    <section style="margin-top:16px">
+      <div class="section-heading"><h2>${rows.length}件の記録</h2><span class="sub">検索・絞り込みの結果</span></div>
+      <div class="list">${rows.length ? rows.map(recordCard).join('') : `<div class="empty">条件に合う記録がない。検索語や絞り込みを外してみる。</div>`}</div>
+    </section>`;
+}
+
+function organizeView() {
+  const evidenceMissing = state.records.filter((r) => !r.evidence && !r.result);
+  const conditionMissing = state.records.filter((r) => !r.conditions.length && !r.deadline && !r.autonomy && !r.stakeholderScope);
+  const reflectionMissing = state.records.filter((r) => !r.reflection && !r.counterEvidence && !r.nextExperiment);
+  const candidatesThin = state.records.filter((r) => r.interviewUse !== 'まだ使わない' && scoreEvidence(r) < 2);
+  const constraints = state.records.filter((r) => r.type === 'できないこと・制約');
+  const items = [
+    ['証拠待ち', evidenceMissing, '数値、案件名、制作物、URL、第三者の評価などを足す。', 'filter-evidence-missing'],
+    ['条件未整理', conditionMissing, '期限・裁量・関係者・不確実性を記録する。', 'filter-condition-missing'],
+    ['振り返り待ち', reflectionMissing, 'うまくいった条件、反証、次の実験を残す。', 'filter-reflection-missing'],
+    ['面接候補だが薄い', candidatesThin, '提示用の前に、具体例と証拠を増やす。', 'filter-interview-thin'],
+  ];
+  return `${heading('整理', '足りないものを「弱さ」ではなく、次に手入れする場所として扱う。')}
+    <section class="grid grid-4">${items.map(([label, rows, text, action]) => `<div class="card kpi"><div class="kpi-value">${rows.length}</div><div class="kpi-label">${label}</div><div class="kpi-note">${text}</div><div style="margin-top:10px">${button('見る', action, { small:true })}</div></div>`).join('')}</section>
+    <section class="grid grid-2" style="margin-top:16px">
+      ${items.slice(0,2).map(([label, rows, text]) => `<div class="card card-pad"><div class="section-heading"><h2>${label}</h2><span class="sub">${text}</span></div><div class="list">${rows.slice(0,5).length ? rows.slice(0,5).map(recordCard).join('') : `<div class="empty">ここは今のところ空。良い状態。</div>`}</div></div>`).join('')}
+      <div class="card card-pad"><div class="section-heading"><h2>できないこと・制約</h2><span class="sub">${constraints.length}件</span></div><div class="notice">ここは改善リストではない。現時点で前提に置かないこと、必要な支援、避ける条件、代替手段を明文化する場所。</div><div class="list" style="margin-top:12px">${constraints.slice(0,5).length ? constraints.slice(0,5).map(recordCard).join('') : `<div class="empty">まだない。車の運転、早起き、即興会議など、無理を前提にしないことを残せる。</div>`}</div><div style="margin-top:10px">${button('制約だけを見る', 'filter-constraints', {small:true})}</div></div>
+    </section>
+    <section class="card card-pad" style="margin-top:16px">
+      <div class="section-heading"><h2>整理の原則</h2></div>
+      <div class="notice">評価の低い記録を消す場所ではない。「事実」「証拠」「条件」「反証」「次の実験・代替策」のどこが空いているかを見つけ、次の一手をつくる場所。</div>
+    </section>`;
+}
+
+function discoverView() {
+  const usable = state.records.filter((r) => r.enjoyment && r.capability);
+  const cells = Array.from({ length: 5 }, () => Array.from({ length: 5 }, () => []));
+  usable.forEach((r) => cells[5 - r.capability][r.enjoyment - 1].push(r));
+  const axisAverages = Object.entries(AXIS_LABELS).map(([key, label]) => {
+    const vals = state.records.map((r) => r[key]).filter((n) => Number.isFinite(n));
+    return { key, label, avg: vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0, count: vals.length };
+  });
+  const tagsCount = new Map();
+  state.records.forEach((r) => r.conditions.forEach((tag) => tagsCount.set(tag, (tagsCount.get(tag) || 0) + 1)));
+  const topConditions = [...tagsCount.entries()].sort((a,b) => b[1]-a[1]).slice(0,8);
+  return `${heading('発見', '点数で自分を断定せず、記録に現れた偏りや条件を眺める。')}
+    <section class="card card-pad">
+      <div class="section-heading"><h2>好き度 × 扱える範囲</h2><span class="sub">両方を入力した ${usable.length}件</span></div>
+      ${usable.length ? `<div class="matrix"><div class="matrix-label">扱える範囲<br>↑</div>${[1,2,3,4,5].map((n) => `<div class="matrix-label">好き度 ${n}</div>`).join('')}${[5,4,3,2,1].map((cap) => `<div class="matrix-label">${escape(CAPABILITY[cap-1])}</div>${[1,2,3,4,5].map((enjoy) => { const rs=cells[5-cap][enjoy-1]; return `<div class="matrix-cell"><strong>${rs.length}件</strong>${rs.slice(0,4).map((r) => `<button class="matrix-item" data-action="open-record" data-id="${escape(r.id)}">${escape(r.title)}</button>`).join('')}</div>`; }).join('')}`).join('')}</div>` : `<div class="empty">詳細画面の「振り返り」で好き度と扱える範囲を入れると、ここに並ぶ。</div>`}
+    </section>
+    <section class="grid grid-2" style="margin-top:16px">
+      <div class="card card-pad"><div class="section-heading"><h2>扱っている要素</h2><span class="sub">0〜3の平均</span></div><div class="metric-bars">${axisAverages.map((x) => `<div class="metric-bar"><span>${escape(x.label)}</span><div class="track"><div class="fill" style="width:${(x.avg / 3) * 100}%"></div></div><strong>${x.count ? x.avg.toFixed(1) : '—'}</strong></div>`).join('')}</div></div>
+      <div class="card card-pad"><div class="section-heading"><h2>よく出る条件</h2><span class="sub">条件タグの出現数</span></div>${topConditions.length ? `<div class="progress-list">${topConditions.map(([tag, count]) => `<div class="progress-row"><span>${escape(tag)}</span><strong>${count}件</strong></div>`).join('')}</div>` : `<div class="empty">条件タグがまだない。詳細画面から足してみる。</div>`}</div>
+    </section>
+    <section class="notice" style="margin-top:16px">「数字・データ」と「言葉・文脈」は対立軸ではない。両方が高い記録は、数値と意味を往復している経験の手がかりになる。</section>`;
+}
+
+function outputView() {
+  const chosen = state.records.filter((r) => state.selected.has(r.id));
+  return `${heading('出力', '台帳を直接書き換えず、必要な記録だけを提示用に編集する。')}
+    <section class="grid grid-2">
+      <div class="card card-pad">
+        <div class="section-heading"><h2>使う記録を選ぶ</h2><span class="sub">${chosen.length}件を選択中</span></div>
+        <div class="notice">私生活・未整理・機密情報は、ここで選ばない限り出力に混ざらない。</div>
+        <div class="list" style="margin-top:12px">${state.records.length ? state.records.slice().sort((a,b)=> (b.interviewUse==='使う')-(a.interviewUse==='使う')).map((r) => recordCard(r,{selectable:true})).join('') : `<div class="empty">まずは受信箱に記録を残す。</div>`}</div>
+      </div>
+      <div class="card card-pad">
+        <div class="section-heading"><h2>下書き</h2><span class="sub">根拠を残したまま整える</span></div>
+        <div class="tabs"><button class="tab active" data-output-kind="summary">職務経歴書</button><button class="tab" data-output-kind="talk">面接90秒</button><button class="tab" data-output-kind="skills">スキル一覧</button></div>
+        <textarea id="output-text" class="output-box" readonly>${escape(buildOutput(chosen, 'summary'))}</textarea>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${button('コピー', 'copy-output', { variant:'primary' })}${button('TSVで書き出す', 'export-selected', { variant:'secondary' })}</div>
+        <hr />
+        <div class="notice">出力は下書き。数字、守秘義務、公開可否、応募先との接続は最後に人の目で確認する。</div>
+      </div>
+    </section>`;
+}
+function buildOutput(records, kind) {
+  if (!records.length) return '左側から、出力したい記録を選んでください。';
+  if (kind === 'talk') return records.map((r, i) => `${i+1}. ${r.oneLiner || r.title}\n根拠：${r.result || r.summary || r.what || '具体例を追記'}\n条件：${r.reproducibleConditions || '要整理'}`).join('\n\n');
+  if (kind === 'skills') return records.map((r) => `・${r.oneLiner || r.title}${r.translation ? `（${r.translation}）` : ''}`).join('\n');
+  return records.map((r) => `【${r.oneLiner || r.title}】\n${r.summary || r.what || ''}\n根拠：${r.evidence || r.result || '要追記'}\n`).join('\n');
+}
+
+function dataView() {
+  const preview = state.importPreview;
+  return `${heading('データ', 'TSVでまとめて編集する。反映前に差分を確認し、必ず戻れる状態で操作する。')}
+    <section class="grid grid-2">
+      <div class="card card-pad">
+        <div class="section-heading"><h2>書き出し</h2></div>
+        <div class="progress-list">
+          <div class="progress-row"><span>全件バックアップ</span>${button('TSVを保存', 'export-all', {small:true})}</div>
+          <div class="progress-row"><span>現在の絞り込み結果</span>${button('TSVを保存', 'export-filtered', {small:true})}</div>
+          <div class="progress-row"><span>空テンプレート</span>${button('コピー', 'copy-template', {small:true})}</div>
+          <div class="progress-row"><span>初期台帳（${INITIAL_SAMPLE_COUNT}件）</span>${button('追加する', 'seed-sample', {small:true})}</div>
+        </div>
+        <p class="help">公開GitHub Pagesに置く場合、業務の未公表情報・売上・連絡先などを含むTSVをリポジトリに置かない。</p>
+      </div>
+      <div class="card card-pad">
+        <div class="section-heading"><h2>安全な取り込み</h2></div>
+        <div class="notice warn">貼り付けた瞬間には保存しない。<strong>貼る → 読み取る → 差分を見る → 反映する</strong>の順で進める。</div>
+        <div class="field" style="margin-top:12px"><label class="label">取り込み方式</label><select id="import-mode" class="select"><option value="add">追加（既存データは触らない）</option><option value="partial">部分更新（ID一致の列だけ更新）</option><option value="restore">全件復元（バックアップから戻す）</option><option value="replace">全置換（現在の台帳を置き換える）</option></select></div>
+        <div class="field" style="margin-top:12px"><label class="label">TSVを貼り付ける</label><textarea id="import-text" class="textarea import-area" placeholder="Excel / Googleスプレッドシートから、見出し行を含めて貼り付け"></textarea></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${button('差分を確認', 'parse-import', {variant:'primary'})}${button('ファイルを選ぶ', 'choose-tsv-file', {variant:'secondary'})}<input id="tsv-file" type="file" accept=".tsv,text/tab-separated-values,text/plain" hidden /></div>
+      </div>
+    </section>
+    ${preview ? importPreviewView(preview) : ''}
+    <section class="card card-pad" style="margin-top:16px"><div class="section-heading"><h2>部分更新のルール</h2></div><div class="notice"><span class="code">__id</span> が一致する記録だけを更新する。TSVに列そのものがなければ変更しない。列があってもセルが空なら変更しない。値を消すときだけ <span class="code">__CLEAR__</span> を入れる。</div></section>`;
+}
+function importPreviewView(preview) {
+  const examples = preview.rows.slice(0, 20);
+  const error = preview.errors.length;
+  return `<section class="card card-pad" style="margin-top:16px"><div class="section-heading"><h2>取り込み前の差分</h2><span class="sub">${preview.modeLabel}</span></div>
+  <div class="grid grid-4"><div class="kpi"><div class="kpi-value">${preview.add}</div><div class="kpi-label">追加</div></div><div class="kpi"><div class="kpi-value">${preview.update}</div><div class="kpi-label">更新</div></div><div class="kpi"><div class="kpi-value">${preview.skip}</div><div class="kpi-label">スキップ</div></div><div class="kpi"><div class="kpi-value">${error}</div><div class="kpi-label">エラー</div></div></div>
+  ${error ? `<div class="notice danger" style="margin-top:12px">エラー行がある。修正するか、「エラー行を除いて反映」を選ぶ。</div>` : `<div class="notice" style="margin-top:12px">内容を確認してから反映する。反映前に自動バックアップを作る。</div>`}
+  <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>行</th><th>タイトル</th><th>判定</th><th>内容</th></tr></thead><tbody>${examples.map((x) => `<tr class="row-${x.kind}"><td>${x.line}</td><td>${escape(x.title || '—')}</td><td>${escape(x.label)}</td><td>${escape(x.note)}</td></tr>`).join('')}</tbody></table></div>
+  ${preview.rows.length > examples.length ? `<p class="help">ほか ${preview.rows.length-examples.length}行は省略表示。</p>` : ''}
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">${button('反映する', 'apply-import', {variant:'primary', extra: error ? 'data-allow-errors="true"' : ''})}${button('プレビューを閉じる', 'clear-import-preview', {variant:'secondary'})}</div>
   </section>`;
 }
-function renderDetailCore(draft) {
-  return sectionWrapper('core', '記録の基本', '一覧で見つけやすくするための、最小限の情報。', `
-    <div class="field-grid">
-      ${field('タイトル', 'title', draft.title, '例：テーママッチの告知設計を進める', true)}
-      ${selectField('記録の扱い', 'recordStatus', draft.recordStatus, RECORD_STATUSES)}
-      ${selectField('種類', 'type', draft.type, TYPES)}
-      ${selectField('領域', 'domain', draft.domain, DOMAINS)}
-      ${selectField('頻度', 'frequency', draft.frequency, FREQUENCIES)}
-      ${field('最終実施日', 'lastPracticedAt', draft.lastPracticedAt, '', false, 'date')}
-      ${field('タグ', 'tagsText', draft.tagsText ?? draft.tags.join(' | '), '例：広報 | 企画 | 英語')}
-    </div>
-    ${field('一言要約', 'summary', draft.summary, '一覧で読めるように、何をした／できるかを短く', false, 'text', true)}
-  `);
-}
-function field(label, path, value, placeholder = '', required = false, type = 'text', textarea = false) {
-  const safe = escapeHTML(value ?? '');
-  return `<div class="field"><label for="field-${path}">${escapeHTML(label)}${required ? '<span aria-hidden="true"> *</span>' : ''}</label>${textarea ? `<textarea id="field-${path}" data-field="${path}" placeholder="${escapeHTML(placeholder)}">${safe}</textarea>` : `<input id="field-${path}" data-field="${path}" type="${type}" value="${safe}" placeholder="${escapeHTML(placeholder)}" ${required ? 'required' : ''}>`}</div>`;
-}
-function selectField(label, path, selected, options) {
-  return `<div class="field"><label for="field-${path}">${escapeHTML(label)}</label><select id="field-${path}" data-field="${path}">${options.map(option => `<option ${option === selected ? 'selected' : ''}>${escapeHTML(option)}</option>`).join('')}</select></div>`;
-}
-function renderFactSection(draft) {
-  return sectionWrapper('fact', '1. 事実', '評価せずに、何があったかを残す。', `
-    ${field('何をしたか', 'fact.what', draft.fact.what, '自分が行ったこと、起きたこと', false, 'text', true)}
-    <div class="field-grid three">
-      ${field('いつ・どこで', 'fact.when', draft.fact.when, '例：2026年6月／業務')}
-      ${field('自分の役割', 'fact.role', draft.fact.role, '例：企画・進行・主担当')}
-      ${field('関係者', 'fact.stakeholders', draft.fact.stakeholders, '例：社内3部署＋制作会社')}
-    </div>
-    ${field('結果・変化', 'fact.result', draft.fact.result, '数字、相手の変化、残ったもの。小さくてもよい。', false, 'text', true)}
-  `);
-}
-function renderEvidenceSection(draft, otherRecords) {
-  const links = otherRecords.length ? `<div class="field"><label>紐づく実例・能力</label><div class="checkbox-list">${otherRecords.map(record => `<label class="checkbox-label"><input type="checkbox" data-link-id="${record.id}" ${draft.linkedRecordIds.includes(record.id) ? 'checked' : ''}><span>${escapeHTML(record.title || '無題の記録')}</span></label>`).join('')}</div><p class="help-text">能力・知識の記録に、根拠となる実例をつなぐための欄。</p></div>` : '';
-  return sectionWrapper('evidence', '2. 証拠', 'あとから裏取りできるもの。URL、案件名、数字、資料名、第三者の言葉など。', `
-    ${field('証拠・具体例', 'evidenceText', draft.evidenceText, '1行に1件。例：\n2026年6月の告知ページ\n販売数 8,418枚\n制作進行表（Google Drive）', false, 'text', true)}
-    <p class="help-text">公開できない情報は、案件名やファイル名だけでも残す。秘密情報そのものは貼らない。</p>
-    ${links}
-  `);
-}
-function renderConditionsSection(draft) {
-  const c = draft.conditions;
-  const attrs = c.attributes || [];
-  return sectionWrapper('conditions', '3. 条件・背景', '「何が好きか」ではなく、どんな条件で力が出た／出なかったかを残す。', `
-    <div class="field-grid">
-      ${selectField('期限', 'conditions.deadline', c.deadline, DEADLINES)}
-      ${selectField('裁量', 'conditions.autonomy', c.autonomy, AUTONOMIES)}
-      ${selectField('関係者の広さ', 'conditions.stakeholderScale', c.stakeholderScale, STAKEHOLDER_SCALES)}
-      ${selectField('不確実性', 'conditions.uncertainty', c.uncertainty, UNCERTAINTIES)}
-    </div>
-    <div class="field" style="margin-top:12px"><label>条件タグ</label><div class="checkbox-list">${CONDITION_OPTIONS.map(option => `<label class="checkbox-label"><input type="checkbox" data-condition="${escapeHTML(option)}" ${attrs.includes(option) ? 'checked' : ''}><span>${escapeHTML(option)}</span></label>`).join('')}</div></div>
-  `);
-}
-function renderScale(path, value, labels) {
-  return `<div class="scale">${labels.map((label, index) => { const v = index + 1; return `<button type="button" class="${Number(value) === v ? 'is-selected' : ''}" data-scale="${path}" data-value="${v}">${escapeHTML(label)}</button>`; }).join('')}</div>`;
-}
-function renderReflectionSection(draft) {
-  const r = draft.reflection;
-  const capabilityLabels = ['未検証', '支援があれば\nできる', '定型なら\n一人でできる', '例外があっても\n進められる', '人に教える／\n仕組みにできる'];
-  const shortFive = ['かなり低い', 'やや低い', '普通', 'やや高い', '高い'];
-  const axisLabels = ['0', '1', '2', '3'];
-  return sectionWrapper('reflection', '4. 振り返り', '感じ方と実行できた範囲を、事実とは分けて残す。未入力でもよい。', `
-    <div class="field-grid three">
-      <fieldset class="field-group"><legend>好き度</legend>${renderScale('reflection.enjoyment', r.enjoyment, ['かなり嫌い','やや嫌い','どちらでもない','やや好き','かなり好き'])}</fieldset>
-      <fieldset class="field-group"><legend>消耗度</legend>${renderScale('reflection.depletion', r.depletion, shortFive)}</fieldset>
-      <fieldset class="field-group"><legend>扱える範囲</legend>${renderScale('reflection.capability', r.capability, capabilityLabels)}</fieldset>
-    </div>
-    <div class="form-section" style="margin-top:18px"><h2>この記録で扱った要素</h2><p>定量／定性を一本の軸にせず、重なりとして残す。</p><div class="field-grid three">${AXES.map(([key, label]) => `<fieldset class="field-group"><legend>${escapeHTML(label)}</legend><div class="scale compact">${renderScale(`reflection.${key}`, r[key], axisLabels)}</div></fieldset>`).join('')}</div></div>
-    ${field('振り返りメモ', 'reflection.notes', r.notes, '何がうまくいったか。何を次も再現したいか。', false, 'text', true)}
-    <div class="field-grid">
-      ${field('反証・うまくいかなかった条件', 'reflection.counterEvidence', r.counterEvidence, '例：決裁者が不明確な案件では進行が滞った', false, 'text', true)}
-      ${field('次に試すこと', 'reflection.nextExperiment', r.nextExperiment, '例：キックオフ時に判断期限を固定する', false, 'text', true)}
-    </div>
-  `);
-}
-function renderPresentationSection(draft) {
-  const p = draft.presentation;
-  return sectionWrapper('presentation', '5. 提示用メモ', '面接や職務経歴書に使うときだけ編集する。私的な記録を勝手に売り物にしない。', `
-    <div class="field-grid">
-      ${selectField('面接での利用', 'presentation.use', p.use, PRESENTATION_USES)}
-      ${field('応募先・用途タグ', 'presentation.companyTagsText', p.companyTagsText ?? (p.companyTags || []).join(' | '), '例：PARK | Account Producer')}
-    </div>
-    ${field('一言で言うと', 'presentation.oneLiner', p.oneLiner, '例：企画から告知、運用、振り返りまでをつなげる', false, 'text', true)}
-    <div class="field-grid">
-      ${field('再現できる条件', 'presentation.reusableConditions', p.reusableConditions, '例：目的、対象者、決裁者、期限が共有されている', false, 'text', true)}
-      ${field('他社でも通じる言い換え', 'presentation.translation', p.translation, '例：統合コミュニケーション設計・プロジェクト推進', false, 'text', true)}
-    </div>
-  `);
-}
 
-function renderOrganize() {
-  const noEvidence = state.records.filter(r => evidenceCount(r) === 0);
-  const noConditions = state.records.filter(r => r.conditions?.deadline === '未記録' && r.conditions?.autonomy === '未記録' && r.conditions?.stakeholderScale === '未記録');
-  const candidatesWeak = state.records.filter(r => r.presentation?.use !== 'まだ使わない' && evidenceCount(r) < 2);
-  const noCounter = state.records.filter(r => (r.type === '能力・知識' || r.type === '実例') && !r.reflection?.counterEvidence?.trim());
-  const queues = [
-    ['証拠待ち', '数字、URL、資料名、案件名などを足す。', noEvidence],
-    ['条件未整理', 'どんな環境・制約のなかで行ったかを残す。', noConditions],
-    ['面接候補の補強', '候補だが、具体例が少ない記録。', candidatesWeak],
-    ['反証・学び待ち', 'うまくいかなかった条件や次の実験を残す。', noCounter],
-  ];
-  return `
-    <section class="page-head"><div><h1>整理</h1><p>評価を上げる場所ではなく、事実を育てる場所。未整理は失敗ではなく、次の手入れ。</p></div></section>
-    <section class="organize-grid section">
-      ${queues.map(([title, desc, records]) => `<article class="card queue-card"><h3>${title}</h3><p>${desc}</p><div class="queue-count">${records.length}</div>${records.length ? `<div class="queue-items">${records.slice(0,4).map(r => `<button class="queue-item" data-action="open-record" data-record-id="${r.id}">${escapeHTML(r.title || '無題の記録')}</button>`).join('')}${records.length > 4 ? `<span class="muted" style="font-size:11px">ほか ${records.length - 4}件</span>` : ''}</div>` : '<p class="muted" style="font-size:12px">いまは該当なし。</p>'}</article>`).join('')}
-    </section>
-    <section class="section">
-      <div class="section-title"><h2>整える順番</h2><p>全部を一度に埋めなくてよい。</p></div>
-      <div class="card pad"><ol style="margin:0;padding-left:1.25em"><li>「何をしたか」を書く</li><li>案件名・数字・URLなど、裏取りできるものを1つ足す</li><li>期限・裁量・関係者の広さを記録する</li><li>面接で使う必要が出たものだけ、提示用メモへ進める</li></ol></div>
-    </section>
-  `;
-}
 
-function renderDiscover() {
-  const scored = state.records.filter(r => Number(r.reflection?.enjoyment) > 0 && Number(r.reflection?.capability) > 0);
-  const matrixCells = [];
-  for (let capability = 5; capability >= 1; capability--) {
-    matrixCells.push(`<div class="matrix-label">${capability}</div>`);
-    for (let enjoyment = 1; enjoyment <= 5; enjoyment++) {
-      const records = scored.filter(r => Number(r.reflection.capability) === capability && Number(r.reflection.enjoyment) === enjoyment);
-      matrixCells.push(`<div class="matrix-cell" data-matrix-capability="${capability}" data-matrix-enjoyment="${enjoyment}">${records.map(r => `<button class="matrix-record" title="${escapeHTML(r.title)}" data-action="open-record" data-record-id="${r.id}">${escapeHTML(r.title)}</button>`).join('')}</div>`);
-    }
-  }
-  const high = scored.filter(r => r.reflection.enjoyment >= 4 && r.reflection.capability >= 4);
-  const drain = scored.filter(r => r.reflection.capability >= 4 && r.reflection.enjoyment <= 2);
-  const grow = scored.filter(r => r.reflection.enjoyment >= 4 && r.reflection.capability <= 2);
-  const axisTotals = AXES.map(([key, label]) => ({ label, total: state.records.reduce((sum, r) => sum + Number(r.reflection?.[key] || 0), 0) })).sort((a,b) => b.total - a.total);
-  return `
-    <section class="page-head"><div><h1>発見</h1><p>診断ではなく、記録に現れている傾向を見る。評価が入った記録だけを表示。</p></div></section>
-    <section class="discover-grid section">
-      <div class="card pad">
-        <div class="section-title"><h2>好き度 × 扱える範囲</h2><p>${scored.length}件を表示</p></div>
-        <div class="matrix" role="img" aria-label="横軸が好き度、縦軸が扱える範囲のマトリクス">
-          <div></div>${[1,2,3,4,5].map(n => `<div class="matrix-label">好き度 ${n}</div>`).join('')}
-          ${matrixCells.join('')}
-          <div></div>${[1,2,3,4,5].map(n => `<div class="matrix-label">${n}</div>`).join('')}
-        </div>
-        <p class="axis-note">上・右にあるほど「好きで、例外があっても進められる」と自己評価した記録。結論ではなく、掘る候補。</p>
-      </div>
-      <aside class="insight-list">
-        <article class="insight"><strong>好きで、扱える範囲も広い</strong><p>${high.length}件。面接で使う前に、証拠と再現条件を確認する。</p></article>
-        <article class="insight"><strong>得意だが、好きではない</strong><p>${drain.length}件。消耗の原因を条件欄で確かめる。</p></article>
-        <article class="insight"><strong>好きだが、まだ育成中</strong><p>${grow.length}件。次の実験や学習の入口にする。</p></article>
-        <article class="insight"><strong>記録で多く扱っている要素</strong><p>${axisTotals.filter(x => x.total > 0).slice(0,3).map(x => `${escapeHTML(x.label)} ${x.total}`).join(' ／ ') || '評価を入れると、ここに傾向が出る。'}</p></article>
-      </aside>
-    </section>
-    <section class="section"><div class="section-title"><h2>条件別に見る</h2><p>「何が得意か」より、「どんな環境で力が出るか」を見る。</p></div><div class="suggestion-grid">
-      ${['短納期', '関係者が多い', '前例なし'].map(condition => {
-        const records = state.records.filter(r => r.conditions?.deadline === condition || r.conditions?.attributes?.includes(condition) || r.conditions?.uncertainty === condition);
-        return `<button class="suggestion" data-action="show-condition" data-condition-label="${condition}"><b>${condition}</b><span>${records.length}件。クリックで該当記録を台帳で見る。</span></button>`;
-      }).join('')}
-    </div></section>
-  `;
-}
 
-function renderOutput() {
-  const records = [...state.records].sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-  if (!state.outputInitialized) {
-    records.filter(r => r.presentation?.use === '使う').forEach(r => state.outputSelection.add(r.id));
-    state.outputInitialized = true;
-  }
-  const selected = records.filter(r => state.outputSelection.has(r.id));
-  const output = generateOutput(selected, state.outputFormat);
-  return `
-    <section class="page-head"><div><h1>出力</h1><p>台帳本体とは別に、必要な記録だけを面接・職務経歴書用に編集する。</p></div><div class="button-row"><button class="secondary-button" data-action="copy-output">コピー</button><button class="primary-button" data-action="export-output-tsv">選択分をTSV</button></div></section>
-    <section class="output-layout">
-      <div class="card output-select"><div class="section-title"><h2>使う記録</h2><p>${selected.length}件選択</p></div>${records.length ? records.map(r => `<label class="output-record"><input type="checkbox" data-output-id="${r.id}" ${state.outputSelection.has(r.id) ? 'checked' : ''}><span><b>${escapeHTML(r.title || '無題の記録')}</b><br><span class="muted">${escapeHTML(r.presentation?.oneLiner || r.summary || r.type)}</span></span></label>`).join('') : '<p class="muted">まずは台帳に記録を追加する。</p>'}</div>
-      <div class="card output-result"><div class="section-title"><h2>生成する形式</h2><select data-output-format><option value="interview" ${state.outputFormat === 'interview' ? 'selected' : ''}>面接で話す素材</option><option value="bullets" ${state.outputFormat === 'bullets' ? 'selected' : ''}>職務経歴書向け箇条書き</option><option value="evidence" ${state.outputFormat === 'evidence' ? 'selected' : ''}>根拠つき実績一覧</option></select></div><textarea readonly aria-label="出力結果">${escapeHTML(output)}</textarea><p class="help-text">自動生成は下書き。事実と応募先の文脈を見て、最後に自分で編集する。</p></div>
-    </section>
-  `;
-}
-function generateOutput(records, format) {
-  if (!records.length) return '左から、面接で使いたい記録を選ぶとここに下書きが出ます。';
-  if (format === 'bullets') {
-    return records.map(r => `・${r.presentation?.oneLiner || r.summary || r.title}\n  - 具体例：${r.fact?.what || '要追記'}\n  - 根拠：${evidenceLines(r.evidenceText).slice(0,2).join('／') || '要追記'}\n  - 再現条件：${r.presentation?.reusableConditions || '要整理'}`).join('\n\n');
-  }
-  if (format === 'evidence') {
-    return records.map(r => `【${r.title}】\n種類：${r.type}｜領域：${r.domain}\n事実：${r.fact?.what || r.summary || '要追記'}\n役割：${r.fact?.role || '要追記'}\n結果：${r.fact?.result || '要追記'}\n証拠：${evidenceLines(r.evidenceText).join('／') || '要追記'}\n条件：期限 ${r.conditions?.deadline || '未記録'}、裁量 ${r.conditions?.autonomy || '未記録'}、関係者 ${r.conditions?.stakeholderScale || '未記録'}\n`).join('\n');
-  }
-  return `【面接で話す素材】\n\n${records.map((r, index) => `${index + 1}. ${r.presentation?.oneLiner || r.summary || r.title}\n・実例：${r.fact?.what || '要追記'}\n・自分の役割：${r.fact?.role || '要追記'}\n・残ったもの：${r.fact?.result || '要追記'}\n・再現できる条件：${r.presentation?.reusableConditions || '要整理'}\n`).join('\n')}`;
-}
-
-function renderData() {
-  const latestSnapshotNote = 'TSVは「貼る → 読み取る → 差分を見る → 反映する」の順。反映前に自動バックアップを残す。';
-  return `
-    <section class="page-head"><div><h1>データ</h1><p>スプレッドシートで磨くためのTSV入出力。全置換は、必要なときだけ使う。</p></div></section>
-    <section class="card section" style="border-color:#f0c36a;background:#fffaf0">
-      <h2 style="margin-top:0">公開設定の注意</h2>
-      <p style="margin-bottom:0">このプロジェクトの <span class="mono">sample-data.js</span> と <span class="mono">sample-data.tsv</span> には、個人のキャリア情報や業務メモが入る。GitHub Pagesを公開リポジトリで運用する場合は、この2ファイルを削除・置換した公開版を使う。個人用の台帳はローカルまたは非公開環境で管理する。</p>
-    </section>
-    <section class="data-grid section">
-      <article class="card data-action"><h3>全件バックアップ</h3><p>現在の台帳を、すべての列を含むTSVで書き出す。</p><button class="primary-button" data-action="export-all">全件TSVを保存</button></article>
-      <article class="card data-action"><h3>表示中を書き出す</h3><p>台帳の検索・絞り込み条件に合う記録だけを出力する。</p><button class="secondary-button" data-action="export-filtered">表示中をTSV</button></article>
-      <article class="card data-action"><h3>空テンプレート</h3><p>ChatGPTやスプレッドシートで項目を増やすための見出しをコピーする。</p><button class="secondary-button" data-action="copy-template">テンプレートをコピー</button></article>
-    </section>
-    <section class="card import-panel section">
-      <div class="section-title"><div><h2>TSVを取り込む</h2><p>貼り付けた時点では、まだ台帳を書き換えない。</p></div><button class="secondary-button" data-action="undo-import">直前の取り込みを戻す</button></div>
-      <div class="import-mode-grid">
-        ${renderModeChoice('append', '追加', '既存データに触れず、新しい行を足す。')}
-        ${renderModeChoice('partial', '部分更新', 'IDが一致する行の、入っている列だけを更新。')}
-        ${renderModeChoice('restore', '全件復元', 'バックアップTSVを台帳全体として復元。')}
-        ${renderModeChoice('replace', '全置換', '現在の台帳をTSVの内容で完全に置き換える。')}
-      </div>
-      <textarea id="import-text" placeholder="ここにTSVを貼り付ける。\nGoogleスプレッドシートやExcelから、そのまま貼れる。">${escapeHTML(state.importText)}</textarea>
-      <div class="button-row" style="margin-top:10px"><button class="primary-button" data-action="analyze-import">読み取って差分を見る</button><button class="secondary-button" data-action="load-template">テンプレートを入れる</button><label class="secondary-button" for="tsv-file">TSVファイルを選ぶ</label><input class="hidden" id="tsv-file" type="file" accept=".tsv,.txt,text/tab-separated-values"></div>
-      <div class="data-note">${latestSnapshotNote}<br>部分更新は <span class="mono">__id</span> が必須。列がない／セルが空欄なら既存値は変更しない。消す場合だけ <span class="mono">__CLEAR__</span> と入れる。</div>
-      ${state.importPreview ? renderImportPreview() : ''}
-    </section>
-  `;
-}
-function renderModeChoice(mode, title, desc) {
-  return `<button class="mode-choice ${state.importMode === mode ? 'is-selected' : ''}" data-action="set-import-mode" data-mode="${mode}"><strong>${title}</strong><span>${desc}</span></button>`;
-}
-function renderImportPreview() {
-  const preview = state.importPreview;
-  const rows = preview.rows.slice(0, 30);
-  const actionLabels = { new: '追加', update: '更新', skip: 'スキップ', warning: '注意', error: 'エラー' };
-  const classByAction = { new: 'diff-new', update: 'diff-update', skip: 'diff-warning', warning: 'diff-warning', error: 'diff-error' };
-  const errors = preview.rows.filter(row => row.status === 'error').length;
-  return `<div class="preview"><div class="section-title"><div><h2>差分プレビュー</h2><p>追加 ${preview.counts.new}件／更新 ${preview.counts.update}件／スキップ ${preview.counts.skip}件／エラー ${errors}件</p></div><button class="primary-button" data-action="apply-import" ${errors ? 'disabled' : ''}>${state.importMode === 'replace' ? '全置換を実行' : state.importMode === 'restore' ? '復元する' : '反映する'}</button></div>
-  ${state.importMode === 'replace' || state.importMode === 'restore' ? `<div class="data-note">${state.importMode === 'replace' ? '全置換は、TSVにない記録を削除する。反映前にバックアップを作る。' : '全件復元は、現在の台帳をバックアップTSVの内容に戻す。'} </div>` : ''}
-  <table><thead><tr><th>行</th><th>タイトル</th><th>判定</th><th>内容</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row.index}</td><td>${escapeHTML(row.title || '—')}</td><td class="${classByAction[row.status]}">${actionLabels[row.status]}</td><td>${escapeHTML(row.message)}</td></tr>`).join('')}</tbody></table>${preview.rows.length > 30 ? `<p class="help-text" style="margin-top:8px">先頭30件を表示中。全 ${preview.rows.length}件。</p>` : ''}</div>`;
-}
-function renderModal() {
-  const modal = state.modal;
-  if (modal.type === 'confirm-replace') {
-    return `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><h2 id="modal-title">${modal.title}</h2><p>${modal.description}</p><p><b>現在の台帳：${modal.current}件</b><br>取り込みデータ：${modal.next}件<br>削除予定：${modal.deleted}件</p><label class="field">確認のため、<span class="mono">${modal.confirmText}</span> と入力<input id="confirm-replace-input" autocomplete="off"></label><div class="button-row" style="margin-top:16px"><button class="secondary-button" data-action="close-modal">やめる</button><button class="danger-button" data-action="confirm-replace" data-confirm-text="${escapeHTML(modal.confirmText)}">実行する</button></div></div></div>`;
-  }
-  return '';
-}
-
-// TSV ------------------------------------------------------------------------
-const CANONICAL_HEADERS = [
-  '__id','seedKey','recordStatus','title','type','domain','summary','tags','frequency','lastPracticedAt',
-  'fact.what','fact.when','fact.role','fact.stakeholders','fact.result','evidenceText','linkedRecordIds',
-  'conditions.deadline','conditions.autonomy','conditions.stakeholderScale','conditions.uncertainty','conditions.attributes',
-  'reflection.enjoyment','reflection.depletion','reflection.capability','reflection.dataAxis','reflection.meaningAxis','reflection.peopleAxis','reflection.operationsAxis','reflection.creativeAxis','reflection.technicalAxis','reflection.notes','reflection.counterEvidence','reflection.nextExperiment',
-  'presentation.use','presentation.oneLiner','presentation.reusableConditions','presentation.translation','presentation.companyTags','createdAt','updatedAt',
-];
-const HEADER_LABELS = {
-  '__id':'__id','seedKey':'__seed','recordStatus':'記録の扱い','title':'タイトル','type':'種類','domain':'領域','summary':'一言要約','tags':'タグ','frequency':'頻度','lastPracticedAt':'最終実施日',
-  'fact.what':'何をしたか','fact.when':'いつ・どこで','fact.role':'自分の役割','fact.stakeholders':'関係者','fact.result':'結果・変化','evidenceText':'証拠・具体例','linkedRecordIds':'紐づくID',
-  'conditions.deadline':'期限','conditions.autonomy':'裁量','conditions.stakeholderScale':'関係者の広さ','conditions.uncertainty':'不確実性','conditions.attributes':'条件タグ',
-  'reflection.enjoyment':'好き度','reflection.depletion':'消耗度','reflection.capability':'扱える範囲','reflection.dataAxis':'数字・データ','reflection.meaningAxis':'言葉・文脈','reflection.peopleAxis':'人・利害','reflection.operationsAxis':'現場運用','reflection.creativeAxis':'制作・表現','reflection.technicalAxis':'技術・仕組み','reflection.notes':'振り返りメモ','reflection.counterEvidence':'反証・うまくいかなかった条件','reflection.nextExperiment':'次に試すこと',
-  'presentation.use':'面接での利用','presentation.oneLiner':'一言で言うと','presentation.reusableConditions':'再現できる条件','presentation.translation':'他社でも通じる言い換え','presentation.companyTags':'応募先・用途タグ','createdAt':'作成日時','updatedAt':'更新日時',
+const SKILL_STATUS_ORDER = ['yes', 'guided', 'no', 'unknown'];
+const SKILL_UI_LABELS = {
+  yes: '○ 実務で一人でできる',
+  guided: '△ 手順・確認があればできる',
+  no: '× 現時点で前提に置かない',
+  unknown: '— 未経験・判断保留',
 };
-const HEADER_ALIASES = (() => {
-  const map = {};
-  Object.entries(HEADER_LABELS).forEach(([key, label]) => { map[normalizeKey(key)] = key; map[normalizeKey(label)] = key; });
-  const aliases = {
-    id:'__id', recordid:'__id', id:'__id', 得意度:'reflection.capability', 得意不得意:'reflection.capability', 扱える範囲:'reflection.capability',
-    好き嫌い:'reflection.enjoyment', 好き度:'reflection.enjoyment', 消耗:'reflection.depletion', 消耗度:'reflection.depletion',
-    証拠:'evidenceText', 証拠具体例:'evidenceText', 内容:'summary', メモ:'summary',
-    実績:'fact.what', できること:'fact.what', 何をした:'fact.what',
-    面接利用:'presentation.use', 面接で使えるか:'presentation.use',
-    数字:'reflection.dataAxis', 定量:'reflection.dataAxis', 定性:'reflection.meaningAxis', 文脈:'reflection.meaningAxis',
-    タグ:'tags', 種別:'type', 分類:'type',
-  };
-  Object.entries(aliases).forEach(([alias, key]) => { map[normalizeKey(alias)] = key; });
-  return map;
-})();
-function quoteTSV(value) {
-  const text = String(value ?? '');
-  return /[\t\n\r"]/.test(text) ? `"${text.replaceAll('"','""')}"` : text;
-}
-function recordToTsvRow(record) {
-  const get = path => getByPath(record, path);
-  return CANONICAL_HEADERS.map(key => {
-    if (key === '__id') return record.id;
-    if (key === 'seedKey') return record.seedKey || '';
-    const value = get(key);
-    if (Array.isArray(value)) return value.join(' | ');
-    return value ?? '';
+const GUIDED_SUPPORT_OPTIONS = ['見本があれば', '検索すれば', '手順書があれば', 'レビューがあれば'];
+const SKILL_PIN_OPTIONS = ['仕事で使った', '個人で試した', '条件あり', '証拠を後で足す', '学びたい'];
+const OUTPUT_FILTERS = {
+  all: 'すべて',
+  ready: '○だけ',
+  usable: '○＋△',
+  pinned: 'メモ・ピンあり',
+  constraints: '×・制約',
+};
+const QUICK_SKILL_IDS = [
+  'spreadsheet-12', 'writing-16', 'planning-04', 'event-07', 'digital-20', 'english-01',
+];
+const WORK_PATHS = [
+  { id: 'numbers', label: '数字と判断', description: '表計算・データから、判断材料を整える操作', categoryIds: ['spreadsheet', 'data'] },
+  { id: 'words', label: '言葉と発信', description: '文章・広報で、誤解なく行動につなげる操作', categoryIds: ['writing', 'pr'] },
+  { id: 'coordination', label: '企画と調整', description: '目的・判断・関係者をそろえて前に進める操作', categoryIds: ['planning'] },
+  { id: 'field', label: '現場と制作', description: '集客・当日運用・制作進行の具体操作', categoryIds: ['event', 'production'] },
+];
+
+const skillStatusById = (id) => SKILL_STATUSES.find((status) => status.id === id) || SKILL_STATUSES[3];
+const skillQuestionById = (id) => SKILL_QUESTIONS.find((question) => question.id === id);
+const skillAnswered = (answer) => Boolean(answer?.status);
+const selectedQuestionIds = (ids = []) => [...new Set(ids)].filter((id) => skillQuestionById(id));
+const toggleListValue = (values, value) => values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
+
+function skillCounts(questionIds = SKILL_QUESTIONS.map((question) => question.id)) {
+  const counts = { yes: 0, guided: 0, no: 0, unknown: 0, unanswered: 0, total: questionIds.length, note: 0, pin: 0 };
+  questionIds.forEach((questionId) => {
+    const answer = skillAnswer(questionId);
+    if (answer.note?.trim()) counts.note += 1;
+    if (answer.pins?.length) counts.pin += 1;
+    if (answer.status && counts[answer.status] !== undefined) counts[answer.status] += 1;
+    else counts.unanswered += 1;
   });
+  return counts;
 }
-function buildTSV(records) {
-  const headers = CANONICAL_HEADERS.map(key => HEADER_LABELS[key]);
-  return [headers, ...records.map(recordToTsvRow)].map(row => row.map(quoteTSV).join('\t')).join('\n');
+function categoryQuestions(categoryId) { return SKILL_QUESTIONS.filter((question) => question.categoryId === categoryId); }
+function questionIdsForCategories(categoryIds) { return SKILL_QUESTIONS.filter((question) => categoryIds.includes(question.categoryId)).map((question) => question.id); }
+function questionIdsForWorkPath(pathId) { return questionIdsForCategories((WORK_PATHS.find((path) => path.id === pathId) || {}).categoryIds || []); }
+function skillAnswerMarkup(questionId, answer) {
+  return SKILL_STATUSES.map((status) => {
+    const active = answer.status === status.id ? 'active' : '';
+    return `<button type="button" class="skill-answer ${status.id} ${active}" data-action="answer-skill" data-question-id="${escape(questionId)}" data-status="${status.id}"><strong>${escape(status.mark)}</strong><span>${escape(SKILL_UI_LABELS[status.id])}</span></button>`;
+  }).join('');
 }
-function buildTemplateTSV() {
-  const example = defaultRecord({
-    id: '例のID（新規追加なら空欄でOK）',
-    recordStatus: '事実',
-    title: '例：英語記事を読んで要点を整理した', type: '能力・知識', domain: '学習', summary: '英語記事を読み、仕事に使える日本語メモへ整理する', tags: ['英語','リサーチ'], frequency: '継続中',
-    fact: { what: '海外記事を読んで要点を日本語で整理した', when: '2026年6月', role: '個人', stakeholders: '自分', result: '論点をすぐ使える形にした' },
-    evidenceText: '記事URL\n要点メモ',
-    conditions: { deadline:'余裕あり', autonomy:'高い', stakeholderScale:'自分中心', uncertainty:'例外あり', attributes:['裁量あり','文章化が必要'] },
-    reflection: { enjoyment:4, depletion:2, capability:3, dataAxis:1, meaningAxis:3, peopleAxis:0, operationsAxis:0, creativeAxis:1, technicalAxis:0, notes:'', counterEvidence:'専門用語は要確認', nextExperiment:'5分で口頭説明する' },
-    presentation: { use:'候補', oneLiner:'海外情報を仕事で使える論点に変換できる', reusableConditions:'出力先が明確なとき', translation:'英語による情報収集', companyTags:['英語','リサーチ'] },
-  });
-  return buildTSV([example]);
+function skillProgressBar(answered, total) {
+  const ratio = total ? Math.round((answered / total) * 100) : 0;
+  return `<div class="skill-progress" aria-label="${answered} / ${total}問 回答済み"><div class="skill-progress-fill" style="width:${ratio}%"></div></div>`;
 }
-function parseTSV(text) {
+function shortSkillSummary(counts) { return `${counts.yes} ○ / ${counts.guided} △ / ${counts.no} × / ${counts.unknown} —`; }
+function quickSkillQuestionIds() { return selectedQuestionIds(QUICK_SKILL_IDS); }
+function answerMetaMarkup(answer, compact = false) {
   const rows = [];
-  let row = [];
-  let cell = '';
-  let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    const next = text[i + 1];
-    if (char === '"') {
-      if (inQuotes && next === '"') { cell += '"'; i++; }
-      else inQuotes = !inQuotes;
-      continue;
-    }
-    if (!inQuotes && char === '\t') { row.push(cell); cell = ''; continue; }
-    if (!inQuotes && (char === '\n' || char === '\r')) {
-      if (char === '\r' && next === '\n') i++;
-      row.push(cell); rows.push(row); row = []; cell = ''; continue;
-    }
-    cell += char;
+  if (answer.guidedSupport?.length) rows.push(`<span class="skill-meta-chip support">△ ${escape(answer.guidedSupport.join('・'))}</span>`);
+  (answer.pins || []).forEach((pin) => rows.push(`<span class="skill-meta-chip pin">${escape(pin)}</span>`));
+  if (!rows.length) return '';
+  return `<div class="skill-meta-row ${compact ? 'compact' : ''}">${rows.join('')}</div>`;
+}
+function guidedSupportMarkup(questionId, answer) {
+  if (answer.status !== 'guided') return '';
+  return `<div class="skill-subsection"><div class="skill-subsection-head"><strong>△の条件</strong><span>任意。使えるために必要なものを残す。</span></div><div class="skill-chip-row">${GUIDED_SUPPORT_OPTIONS.map((option) => `<button type="button" class="skill-chip ${answer.guidedSupport.includes(option) ? 'active' : ''}" data-action="toggle-guided-support" data-question-id="${escape(questionId)}" data-value="${escape(option)}">${escape(option)}</button>`).join('')}</div></div>`;
+}
+function pinMarkup(questionId, answer) {
+  return `<div class="skill-subsection"><div class="skill-subsection-head"><strong>この回答にピンを置く</strong><span>自由記入なしでも、後で見つけやすくなる。</span></div><div class="skill-chip-row">${SKILL_PIN_OPTIONS.map((option) => `<button type="button" class="skill-chip pin-chip ${answer.pins.includes(option) ? 'active' : ''}" data-action="toggle-skill-pin" data-question-id="${escape(questionId)}" data-value="${escape(option)}">${escape(option)}</button>`).join('')}</div></div>`;
+}
+function startSkillSession(questionIds, options = {}) {
+  const ids = selectedQuestionIds(questionIds);
+  if (!ids.length) { toast('開始できる質問がない。', 'warn'); return; }
+  const preferredIndex = options.preferredId ? ids.indexOf(options.preferredId) : -1;
+  const firstUnanswered = ids.findIndex((id) => !skillAnswer(id).status);
+  const index = preferredIndex >= 0 ? preferredIndex : firstUnanswered >= 0 ? firstUnanswered : 0;
+  state.skill = {
+    ...state.skill,
+    sessionIds: ids,
+    index,
+    sessionName: options.name || 'できることチェック',
+    memoOpenQuestionId: options.memoQuestionId || '',
+    lastAnswered: options.keepRecent ? state.skill.lastAnswered : null,
+  };
+  persistSkillSession();
+  render();
+  window.scrollTo(0, 0);
+}
+function endSkillSession() {
+  state.skill = { ...state.skill, sessionIds: [], index: 0, memoOpenQuestionId: '', sessionName: '' };
+  persistSkillSession();
+  render();
+}
+async function updateSkillAnswer(questionId, patch, announce = '') {
+  const current = skillAnswer(questionId);
+  const next = normalizeSkillAnswer({ ...current, ...patch, questionId, updatedAt: now() });
+  state.skillAnswers.set(questionId, next);
+  await putSkillAnswer(next);
+  if (announce) toast(announce);
+  return next;
+}
+async function setSkillStatus(questionId, status) {
+  await updateSkillAnswer(questionId, { status });
+  state.skill.lastAnswered = { questionId, status };
+  const currentInSession = state.skill.sessionIds[state.skill.index] === questionId;
+  const canAdvance = currentInSession && state.skill.tempo === 'fast' && state.skill.index < state.skill.sessionIds.length - 1;
+  if (canAdvance) {
+    state.skill.index += 1;
+    state.skill.memoOpenQuestionId = '';
+    persistSkillSession();
+    render();
+    toast('保存した。直前の回答には後からメモを足せる。');
+    window.scrollTo(0, 0);
+    return;
   }
-  if (cell.length || row.length) { row.push(cell); rows.push(row); }
-  return rows.filter(row => row.some(cell => String(cell).trim() !== ''));
+  persistSkillSession();
+  render();
+  toast(status === 'guided' ? '回答を保存した。必要なら△の条件も選べる。' : '回答を保存した。');
 }
-function getByPath(obj, path) {
-  return path.split('.').reduce((acc, key) => acc?.[key], obj);
+async function toggleGuidedSupport(questionId, value) {
+  const answer = skillAnswer(questionId);
+  await updateSkillAnswer(questionId, { guidedSupport: toggleListValue(answer.guidedSupport, value) });
+  if ($('.skill-memo-modal')) return skillMemoModal(questionId);
+  render();
 }
-function setByPath(obj, path, value) {
-  const keys = path.split('.');
-  const last = keys.pop();
-  const target = keys.reduce((acc, key) => { if (!acc[key] || typeof acc[key] !== 'object') acc[key] = {}; return acc[key]; }, obj);
-  target[last] = value;
+async function toggleSkillPin(questionId, value) {
+  const answer = skillAnswer(questionId);
+  await updateSkillAnswer(questionId, { pins: toggleListValue(answer.pins, value) });
+  if ($('.skill-memo-modal')) return skillMemoModal(questionId);
+  render();
 }
-function valueFromTSV(path, raw) {
-  const value = String(raw ?? '');
-  if (value === '__CLEAR__') return '__CLEAR__';
-  if (['tags','conditions.attributes','presentation.companyTags','linkedRecordIds'].includes(path)) return normalizeTags(value);
-  if (['reflection.enjoyment','reflection.depletion','reflection.capability','reflection.dataAxis','reflection.meaningAxis','reflection.peopleAxis','reflection.operationsAxis','reflection.creativeAxis','reflection.technicalAxis'].includes(path)) {
-    const lookup = {
-      'かなり嫌い':1,'やや嫌い':2,'どちらでもない':3,'やや好き':4,'かなり好き':5,
-      'かなり低い':1,'やや低い':2,'普通':3,'やや高い':4,'高い':5,
-      '未検証':1,'支援があればできる':2,'定型なら一人でできる':3,'例外があっても進められる':4,'人に教える／仕組みにできる':5,
-    };
-    return Number.isFinite(Number(value)) && value !== '' ? Number(value) : (lookup[value] || 0);
-  }
-  return value;
+async function clearSkillAnswer(questionId) {
+  const answer = skillAnswer(questionId);
+  if (!answer.status && !answer.note && !answer.pins.length) return;
+  if (!confirm('この質問の回答・メモ・ピンを消す？')) return;
+  await deleteSkillAnswer(questionId);
+  state.skillAnswers.delete(questionId);
+  render();
+  toast('回答を消した。');
 }
-function analyzeImport(text, mode) {
-  const table = parseTSV(text);
-  if (table.length < 2) return { error: '見出し行と、少なくとも1行のデータが必要。' };
-  const rawHeaders = table[0];
-  const columnMap = rawHeaders.map(header => HEADER_ALIASES[normalizeKey(header)] || null);
-  const validColumns = columnMap.filter(Boolean);
-  if (!validColumns.includes('title') && !validColumns.includes('__id')) return { error: '「タイトル」または「__id」列が見つからない。テンプレートの見出しを使う。' };
-  const existingById = new Map(state.records.map(record => [record.id, record]));
-  const existingTitles = new Map();
-  state.records.forEach(record => {
-    const key = normalizeKey(record.title);
-    if (key) existingTitles.set(key, (existingTitles.get(key) || []).concat(record));
+async function clearSkillStatusOnly(questionId) {
+  if (!questionId) return;
+  const answer = skillAnswer(questionId);
+  await updateSkillAnswer(questionId, { status: '', guidedSupport: [] });
+  state.skill.lastAnswered = null;
+  const index = state.skill.sessionIds.indexOf(questionId);
+  if (index >= 0) state.skill.index = index;
+  persistSkillSession();
+  render();
+  toast('直前の回答を取り消した。メモとピンは残してある。');
+  window.scrollTo(0, 0);
+}
+function skillQuestionsForOutput(filter = state.skill.outputFilter) {
+  return SKILL_QUESTIONS.filter((question) => {
+    const answer = skillAnswer(question.id);
+    const decorated = Boolean(answer.status || answer.note?.trim() || answer.pins?.length);
+    if (filter === 'ready') return answer.status === 'yes';
+    if (filter === 'usable') return ['yes', 'guided'].includes(answer.status);
+    if (filter === 'pinned') return Boolean(answer.note?.trim() || answer.pins?.length);
+    if (filter === 'constraints') return question.isConstraint || answer.status === 'no';
+    return decorated;
   });
-  const rows = table.slice(1).map((cells, index) => {
-    const input = {};
-    cells.forEach((cell, colIndex) => {
-      const path = columnMap[colIndex];
-      if (path) input[path] = valueFromTSV(path, cell);
+}
+function answerDetailsForOutput(answer, format) {
+  const lines = [];
+  if (answer.guidedSupport?.length) lines.push(format === 'text' ? `  条件：${answer.guidedSupport.join('・')}` : `  - 条件：${answer.guidedSupport.join('・')}`);
+  if (answer.pins?.length) lines.push(format === 'text' ? `  ピン：${answer.pins.join('・')}` : `  - ピン：${answer.pins.join('・')}`);
+  if (answer.note?.trim()) lines.push(format === 'text' ? `  メモ：${answer.note.trim()}` : `  - メモ：${answer.note.trim()}`);
+  return lines;
+}
+function skillOutput(format = state.skill.outputFormat) {
+  const counts = skillCounts();
+  const outputQuestions = skillQuestionsForOutput();
+  const selectedIds = new Set(outputQuestions.map((question) => question.id));
+  const answeredQuestions = SKILL_QUESTIONS.filter((question) => skillAnswer(question.id).status);
+  const stamp = new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date()).replaceAll('/', '-');
+  const filterLabel = OUTPUT_FILTERS[state.skill.outputFilter] || OUTPUT_FILTERS.all;
+  if (format === 'text') {
+    const lines = [
+      'selfanalysis｜できることチェック',
+      `出力日時：${stamp}`,
+      `表示条件：${filterLabel}`,
+      `回答：${answeredQuestions.length} / ${SKILL_QUESTION_COUNT}問`,
+      `内訳：○ ${counts.yes} / △ ${counts.guided} / × ${counts.no} / — ${counts.unknown} / 未回答 ${counts.unanswered}`,
+      `メモ：${counts.note}件 / ピン：${counts.pin}件`,
+      '',
+    ];
+    SKILL_CATEGORIES.forEach((category) => {
+      const rows = categoryQuestions(category.id).filter((question) => selectedIds.has(question.id));
+      if (!rows.length) return;
+      lines.push(`【${category.label}】`);
+      SKILL_STATUS_ORDER.forEach((statusId) => {
+        const statusRows = rows.filter((question) => skillAnswer(question.id).status === statusId);
+        if (!statusRows.length) return;
+        lines.push(skillStatusById(statusId).short);
+        statusRows.forEach((question) => {
+          const answer = skillAnswer(question.id);
+          lines.push(`- ${question.question}`);
+          lines.push(...answerDetailsForOutput(answer, 'text'));
+        });
+      });
+      const memoOnlyRows = rows.filter((question) => !skillAnswer(question.id).status && (skillAnswer(question.id).note?.trim() || skillAnswer(question.id).pins?.length));
+      if (memoOnlyRows.length) {
+        lines.push('回答保留（メモ・ピンあり）');
+        memoOnlyRows.forEach((question) => {
+          const answer = skillAnswer(question.id);
+          lines.push(`- ${question.question}`);
+          lines.push(...answerDetailsForOutput(answer, 'text'));
+        });
+      }
+      lines.push('');
     });
-    const rowIndex = index + 2;
-    const id = input.__id?.trim();
-    const title = input.title?.trim();
-    const existing = id ? existingById.get(id) : null;
-    const titleMatches = title ? (existingTitles.get(normalizeKey(title)) || []) : [];
-    let status = 'new';
-    let message = '新しい記録として追加する';
-    let record = null;
-    if (mode === 'append') {
-      if (!title) { status = 'error'; message = '追加にはタイトルが必要。'; }
-      else if (id && existing) { status = 'skip'; message = '同じIDが既にあるため、追加では触らない。部分更新を使う。'; }
-      else { record = recordFromImport(input, defaultRecord({ id: id || uid() }), 'new'); }
+    if (!outputQuestions.length) lines.push('表示条件に合う回答・メモがまだない。');
+    return lines.join('\n').trim();
+  }
+  const lines = [
+    '# selfanalysis｜できることチェック',
+    '',
+    `- 出力日時：${stamp}`,
+    `- 表示条件：${filterLabel}`,
+    `- 回答：${answeredQuestions.length} / ${SKILL_QUESTION_COUNT}問`,
+    `- 内訳：○ ${counts.yes} / △ ${counts.guided} / × ${counts.no} / — ${counts.unknown} / 未回答 ${counts.unanswered}`,
+    `- 質問に紐づくメモ：${counts.note}件`,
+    `- ピン：${counts.pin}件`,
+    '',
+    '> これはタイプ診断ではなく、具体的な操作を現時点でどこまで担えるかの棚卸し。回答は状況・道具・経験で変わりうる。',
+  ];
+  SKILL_CATEGORIES.forEach((category) => {
+    const rows = categoryQuestions(category.id).filter((question) => selectedIds.has(question.id));
+    if (!rows.length) return;
+    lines.push('', `## ${category.label}`);
+    SKILL_STATUS_ORDER.forEach((statusId) => {
+      const statusRows = rows.filter((question) => skillAnswer(question.id).status === statusId);
+      if (!statusRows.length) return;
+      lines.push('', `### ${skillStatusById(statusId).short}`);
+      statusRows.forEach((question) => {
+        const answer = skillAnswer(question.id);
+        lines.push(`- ${question.question}`);
+        lines.push(...answerDetailsForOutput(answer, 'markdown'));
+      });
+    });
+    const memoOnlyRows = rows.filter((question) => !skillAnswer(question.id).status && (skillAnswer(question.id).note?.trim() || skillAnswer(question.id).pins?.length));
+    if (memoOnlyRows.length) {
+      lines.push('', '### 回答保留（メモ・ピンあり）');
+      memoOnlyRows.forEach((question) => {
+        const answer = skillAnswer(question.id);
+        lines.push(`- ${question.question}`);
+        lines.push(...answerDetailsForOutput(answer, 'markdown'));
+      });
     }
-    if (mode === 'partial') {
-      if (!id) { status = 'error'; message = '部分更新には __id が必要。'; }
-      else if (!existing) { status = 'error'; message = '一致するIDが見つからない。'; }
-      else {
-        status = 'update'; message = `入力のある ${Object.keys(input).filter(k => k !== '__id' && String(input[k] ?? '') !== '').length}列を更新する`;
-        record = recordFromImport(input, clone(existing), 'partial');
-      }
-    }
-    if (mode === 'restore' || mode === 'replace') {
-      if (!title) { status = 'error'; message = '全件復元・全置換にはタイトルが必要。'; }
-      else {
-        const targetId = id || uid();
-        status = existingById.has(targetId) ? 'update' : 'new';
-        message = existingById.has(targetId) ? '同じIDの記録を置き換える' : '新しい記録として登録する';
-        record = recordFromImport(input, defaultRecord({ id: targetId }), 'new');
-      }
-    }
-    if (titleMatches.length > 1 && !id && status === 'new') { status = 'warning'; message = '同じタイトルの記録が複数ある。重複を確認する。'; }
-    return { index: rowIndex, input, title: title || input['fact.what'] || '', status, message, record };
   });
-  const counts = { new:0, update:0, skip:0, warning:0, error:0 };
-  rows.forEach(row => counts[row.status]++);
-  return { rows, counts, columnMap, rawHeaders };
+  if (!outputQuestions.length) lines.push('', '表示条件に合う回答・メモがまだない。');
+  return lines.join('\n');
 }
-function recordFromImport(input, base, mode) {
-  const target = normalizeRecord(base);
-  Object.entries(input).forEach(([path, value]) => {
-    if (path === '__id') return;
-    if (mode === 'partial' && (value === '' || value == null)) return;
-    if (value === '__CLEAR__') {
-      if (['tags','conditions.attributes','presentation.companyTags','linkedRecordIds'].includes(path)) setByPath(target, path, []);
-      else if (path.startsWith('reflection.')) setByPath(target, path, 0);
-      else setByPath(target, path, '');
+function skillInsightMarkup() {
+  const answered = SKILL_QUESTION_COUNT - skillCounts().unanswered;
+  if (answered < 3) return `<section class="card card-pad skill-insight-empty"><div class="section-heading"><h2>途中の見取り図</h2><span class="sub">3問から表示</span></div><p>まずは3問。ここには診断結果ではなく、回答から見える具体的な操作だけが並ぶ。</p></section>`;
+  const rows = SKILL_CATEGORIES.map((category) => {
+    const questions = categoryQuestions(category.id);
+    const counts = skillCounts(questions.map((question) => question.id));
+    const strengths = questions.filter((question) => skillAnswer(question.id).status === 'yes').slice(0, 3);
+    const supports = questions.filter((question) => skillAnswer(question.id).status === 'guided').slice(0, 2);
+    const pins = questions.filter((question) => skillAnswer(question.id).pins.length || skillAnswer(question.id).note?.trim()).slice(0, 2);
+    if (!strengths.length && !supports.length && !pins.length) return '';
+    return `<article class="skill-insight-card ${category.isConstraint ? 'constraint' : ''}"><div class="skill-insight-title"><span>${escape(category.shortLabel)}</span><strong>${counts.yes} ○ / ${counts.guided} △</strong></div>${strengths.length ? `<p><b>できること</b> ${escape(strengths.map((question) => question.question).join('／'))}</p>` : ''}${supports.length ? `<p><b>条件があれば</b> ${escape(supports.map((question) => question.question).join('／'))}</p>` : ''}${pins.length ? `<p><b>ピン・メモ</b> ${escape(pins.map((question) => question.question).join('／'))}</p>` : ''}</article>`;
+  }).filter(Boolean).slice(0, 6);
+  return `<section class="card card-pad" style="margin-top:16px"><div class="section-heading"><h2>今のところ見えていること</h2><span class="sub">診断ではなく、回答した具体操作の見取り図</span></div><div class="skill-insight-grid">${rows.join('') || '<p class="muted">回答はあるが、まだカテゴリごとの傾向を出せるほどではない。</p>'}</div></section>`;
+}
+function recentAnswerMarkup() {
+  const recent = state.skill.lastAnswered;
+  if (!recent?.questionId || recent.questionId === state.skill.sessionIds[state.skill.index]) return '';
+  const question = skillQuestionById(recent.questionId);
+  const answer = skillAnswer(recent.questionId);
+  if (!question || !answer.status) return '';
+  return `<aside class="skill-recent-answer"><div><span>直前の回答</span><strong>${escape(skillStatusById(answer.status).short)}｜${escape(question.question)}</strong></div><div>${button('直前にメモ', 'open-recent-skill-memo', { variant:'secondary', small:true })}${button('取り消す', 'undo-recent-skill-answer', { variant:'ghost', small:true })}</div></aside>`;
+}
+function skillDashboardView() {
+  const counts = skillCounts();
+  const quick = quickSkillQuestionIds();
+  const resume = state.skill.sessionIds.length ? ` ${button(`前回の続き（${state.skill.index + 1}問目）`, 'resume-skill', { variant: 'secondary' })}` : '';
+  const format = state.skill.outputFormat;
+  const output = skillOutput(format);
+  const filter = state.skill.outputFilter;
+  return `${heading('できることチェック', 'タイプ診断ではなく、具体的な操作を○△×—で積み上げる。思いついたことは、その質問にピンやメモで残す。', `${button('3分だけ答える', 'start-skill-quick', { variant:'primary' })}${resume}`)}
+    <section class="card skill-hero">
+      <div class="skill-hero-copy">
+        <span class="eyebrow">Concrete skill inventory</span>
+        <h2>「何が得意か」より、<br>何をどこまで担えるか。</h2>
+        <p>自由記入を必須にしない。まずは具体的な一行へ答える。根拠や思い出は、浮かんだときにだけ質問へピンやメモを添える。</p>
+        <div class="skill-hero-actions">${button('3分だけ答える｜6問', 'start-skill-quick', { variant:'primary' })}${button(`全 ${SKILL_QUESTION_COUNT}問を始める`, 'start-skill-all', { variant:'secondary' })}</div>
+      </div>
+      <div class="skill-hero-summary">
+        <div class="skill-summary-total"><strong>${SKILL_QUESTION_COUNT - counts.unanswered}</strong><span>/ ${SKILL_QUESTION_COUNT}問<br>回答済み</span></div>
+        ${skillProgressBar(SKILL_QUESTION_COUNT - counts.unanswered, SKILL_QUESTION_COUNT)}
+        <div class="skill-status-mini"><span class="yes">○ ${counts.yes}</span><span class="guided">△ ${counts.guided}</span><span class="no">× ${counts.no}</span><span class="unknown">— ${counts.unknown}</span></div>
+        <div class="skill-mini-meta">メモ ${counts.note}件｜ピン ${counts.pin}件</div>
+      </div>
+    </section>
+    <section class="card card-pad" style="margin-top:16px">
+      <div class="section-heading"><h2>今の仕事から始める</h2><span class="sub">今使っている手つきから、12〜50問ずつ</span></div>
+      <div class="skill-path-grid">${WORK_PATHS.map((path) => { const ids = questionIdsForWorkPath(path.id); const pathCounts = skillCounts(ids); return `<article class="skill-path-card"><span>${ids.length}問</span><h3>${escape(path.label)}</h3><p>${escape(path.description)}</p>${skillProgressBar(ids.length - pathCounts.unanswered, ids.length)}<footer><small>${ids.length - pathCounts.unanswered} / ${ids.length}問</small>${button('始める', 'start-skill-work-path', { variant:'ghost', small:true, extra:`data-path-id="${escape(path.id)}"` })}</footer></article>`; }).join('')}</div>
+    </section>
+    ${skillInsightMarkup()}
+    <section class="grid grid-2" style="margin-top:16px">
+      <div class="card card-pad">
+        <div class="section-heading"><h2>気になる分野を深掘り</h2><span class="sub">回答済みでも、最初の未回答から再開</span></div>
+        <div class="skill-category-grid">${SKILL_CATEGORIES.map((category) => {
+          const questions = categoryQuestions(category.id); const categoryCounts = skillCounts(questions.map((question) => question.id)); const answered = questions.length - categoryCounts.unanswered;
+          return `<article class="skill-category-card ${category.isConstraint ? 'constraint' : ''}"><div class="skill-category-head"><div><span class="skill-category-count">${questions.length}問</span><h3>${escape(category.label)}</h3></div><button class="button ghost small" data-action="start-skill-category" data-category-id="${escape(category.id)}">始める</button></div><p>${escape(category.description)}</p>${skillProgressBar(answered, questions.length)}<div class="skill-category-foot"><span>${answered} / ${questions.length}問</span><span>${escape(shortSkillSummary(categoryCounts))}</span></div></article>`;
+        }).join('')}</div>
+      </div>
+      <div class="card card-pad">
+        <div class="section-heading"><h2>途中経過を出力</h2><span class="sub">回答した分だけ、いつでも持ち出せる</span></div>
+        <div class="skill-output-filter-row">${Object.entries(OUTPUT_FILTERS).map(([id,label]) => `<button type="button" class="skill-filter-chip ${filter === id ? 'active' : ''}" data-action="set-skill-output-filter" data-filter="${id}">${escape(label)}</button>`).join('')}</div>
+        <div class="tabs"><button class="tab ${format === 'markdown' ? 'active' : ''}" data-action="set-skill-output-format" data-format="markdown">Markdown</button><button class="tab ${format === 'text' ? 'active' : ''}" data-action="set-skill-output-format" data-format="text">テキスト</button></div>
+        <textarea id="skill-output-text" class="output-box skill-output-box" readonly>${escape(output)}</textarea>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${button('コピー', 'copy-skill-output', { variant:'primary' })}${button(`${format === 'markdown' ? 'Markdown' : 'テキスト'}を保存`, 'download-skill-output', { variant:'secondary' })}</div>
+        <div class="notice" style="margin-top:12px">出力には、回答・△の条件・質問に紐づくピン／メモだけが入る。途中でも、今の状態をそのまま残せる。</div>
+      </div>
+    </section>
+    <section class="card card-pad" style="margin-top:16px">
+      <div class="section-heading"><h2>このチェックで残すもの</h2></div>
+      <div class="grid grid-4"><div class="skill-rule"><strong>○ 実務で一人でできる</strong><span>現時点で仕事の前提に置ける操作</span></div><div class="skill-rule"><strong>△ 条件があればできる</strong><span>見本・検索・手順書・レビューなどを残せる</span></div><div class="skill-rule"><strong>× 現時点で前提に置かない</strong><span>能力の欠点ではなく、支援や代替策を考える材料</span></div><div class="skill-rule"><strong>— 未経験・判断保留</strong><span>不足ではなく、まだ試していない領域</span></div></div>
+    </section>`;
+}
+function skillQuestionView() {
+  const ids = state.skill.sessionIds;
+  if (!ids.length) return skillDashboardView();
+  const safeIndex = Math.max(0, Math.min(state.skill.index, ids.length - 1));
+  const question = skillQuestionById(ids[safeIndex]);
+  if (!question) { endSkillSession(); return ''; }
+  const answer = skillAnswer(question.id);
+  const answered = ids.filter((id) => skillAnswer(id).status).length;
+  const memoOpen = state.skill.memoOpenQuestionId === question.id || Boolean(answer.note?.trim());
+  const isLast = safeIndex === ids.length - 1;
+  const category = SKILL_CATEGORIES.find((item) => item.id === question.categoryId);
+  const tempo = state.skill.tempo;
+  return `${heading('できることチェック', `${escape(state.skill.sessionName || category?.label || question.category)}｜${safeIndex + 1} / ${ids.length}問。回答はいつでも変えられる。`, button('終了して一覧へ', 'finish-skill-session', { variant:'secondary' }))}
+    <section class="skill-question-shell">
+      <div class="skill-question-top"><div><span class="eyebrow">${escape(category?.shortLabel || 'スキル')}</span><p>${escape(category?.description || '')}</p></div><div class="skill-count">${answered} / ${ids.length}<span>回答済み</span></div></div>
+      ${skillProgressBar(safeIndex + 1, ids.length)}
+      <div class="skill-tempo"><span>テンポ</span><div><button type="button" class="skill-tempo-button ${tempo === 'fast' ? 'active' : ''}" data-action="set-skill-tempo" data-tempo="fast">サクサク<span>答えたら次へ</span></button><button type="button" class="skill-tempo-button ${tempo === 'stay' ? 'active' : ''}" data-action="set-skill-tempo" data-tempo="stay">じっくり<span>その場でメモ</span></button></div></div>
+      ${recentAnswerMarkup()}
+      ${question.isConstraint ? `<div class="notice warn" style="margin-top:16px">これは改善の宿題ではない。現時点で業務の前提に置けるか、必要な支援や代替手段があるかを残すための質問。</div>` : ''}
+      <div class="skill-question-card">
+        <span class="skill-question-number">Q${String(safeIndex + 1).padStart(2, '0')}</span>
+        <h2>${escape(question.question)}</h2>
+        <p>${escape(question.hint)}</p>
+        <div class="skill-answer-grid">${skillAnswerMarkup(question.id, answer)}</div>
+        ${guidedSupportMarkup(question.id, answer)}
+        <div class="skill-memo-area">
+          ${pinMarkup(question.id, answer)}
+          <div class="skill-memo-head"><div><strong>この質問へのメモ</strong><span>任意。思い出・根拠・条件が浮かんだときだけ。</span></div><button type="button" class="button ghost small" data-action="toggle-skill-memo" data-question-id="${escape(question.id)}">${memoOpen ? 'メモを閉じる' : '自由メモ'}</button></div>
+          ${memoOpen ? `<textarea class="textarea skill-memo-input" data-skill-note="${escape(question.id)}" placeholder="例：SUMIFSはチケット販売集計で使った。複数条件の設計は見本を確認する。">${escape(answer.note || '')}</textarea><span class="help">入力内容はこの質問だけに自動保存される。</span>` : ''}
+          ${answerMetaMarkup(answer)}
+        </div>
+        ${answer.status ? `<div class="skill-current-answer"><span>${escape(SKILL_UI_LABELS[answer.status])}</span><button class="text-button" data-action="clear-skill-answer" data-question-id="${escape(question.id)}">回答を消す</button></div>` : `<div class="skill-current-answer muted">まだ答えなくても進める。未回答は出力に含めない。</div>`}
+      </div>
+      <div class="skill-question-nav"><button class="button ghost" data-action="skill-prev" ${safeIndex === 0 ? 'disabled' : ''}>← 前へ</button><div>${button('途中経過を出力', 'show-skill-output', { variant:'secondary' })}</div><button class="button primary" data-action="skill-next">${isLast ? '一覧へ戻る' : '次へ →'}</button></div>
+    </section>`;
+}
+function skillsView() { return state.skill.sessionIds.length ? skillQuestionView() : skillDashboardView(); }
+
+function skillMemoModal(questionId, title = 'この質問にメモを添える') {
+  const question = skillQuestionById(questionId);
+  if (!question) return;
+  const answer = skillAnswer(questionId);
+  $('#modal-root').innerHTML = `<div class="modal-backdrop" data-action="close-modal"><section class="modal skill-memo-modal" role="dialog" aria-modal="true" aria-labelledby="skill-memo-title" onclick="event.stopPropagation()"><header class="modal-head"><h2 id="skill-memo-title">${escape(title)}</h2><button class="icon-button" type="button" data-action="close-modal" aria-label="閉じる">×</button></header><div class="modal-body"><div class="skill-modal-question"><span>${escape(skillStatusById(answer.status).short)}</span><strong>${escape(question.question)}</strong></div>${guidedSupportMarkup(questionId, answer)}${pinMarkup(questionId, answer)}<div class="field" style="margin-top:16px"><label class="label" for="recent-note">自由メモ</label><textarea id="recent-note" class="textarea skill-memo-input" data-skill-note="${escape(questionId)}" placeholder="仕事で使った場面、条件、証拠など。短くてもよい。">${escape(answer.note || '')}</textarea><span class="help">入力内容はこの質問だけに自動保存される。</span></div>${answerMetaMarkup(answer)}</div><footer class="modal-foot"><span class="muted">質問に紐づくメモ</span>${button('閉じる', 'close-modal', { variant:'primary' })}</footer></section></div>`;
+  document.body.style.overflow = 'hidden';
+}
+function skillOutputModal() {
+  const format = state.skill.outputFormat;
+  const text = skillOutput(format);
+  const filter = state.skill.outputFilter;
+  $('#modal-root').innerHTML = `<div class="modal-backdrop" data-action="close-modal"><section class="modal skill-output-modal" role="dialog" aria-modal="true" aria-labelledby="skill-output-title" onclick="event.stopPropagation()"><header class="modal-head"><h2 id="skill-output-title">できることチェックを出力</h2><button class="icon-button" type="button" data-action="close-modal" aria-label="閉じる">×</button></header><div class="modal-body"><div class="notice">途中経過でも、回答・△の条件・質問に紐づくピン／メモを出力する。未回答は本文に含めない。</div><div class="skill-output-filter-row" style="margin-top:14px">${Object.entries(OUTPUT_FILTERS).map(([id,label]) => `<button type="button" class="skill-filter-chip ${filter === id ? 'active' : ''}" data-action="set-skill-output-filter" data-filter="${id}">${escape(label)}</button>`).join('')}</div><div class="tabs" style="margin-top:14px"><button class="tab ${format === 'markdown' ? 'active' : ''}" data-action="set-skill-output-format" data-format="markdown">Markdown</button><button class="tab ${format === 'text' ? 'active' : ''}" data-action="set-skill-output-format" data-format="text">テキスト</button></div><textarea id="skill-output-modal-text" class="output-box skill-output-box" readonly>${escape(text)}</textarea></div><footer class="modal-foot"><span class="muted">${SKILL_QUESTION_COUNT - skillCounts().unanswered} / ${SKILL_QUESTION_COUNT}問 回答済み</span><div style="display:flex;gap:8px">${button('コピー', 'copy-skill-output', {variant:'secondary'})}${button(`${format === 'markdown' ? 'Markdown' : 'テキスト'}を保存`, 'download-skill-output', {variant:'primary'})}</div></footer></section></div>`;
+  document.body.style.overflow = 'hidden';
+}
+
+function page() {
+  if (state.tab === 'skills') return skillsView();
+  if (state.tab === 'ledger') return ledgerView();
+  if (state.tab === 'organize') return organizeView();
+  if (state.tab === 'discover') return discoverView();
+  if (state.tab === 'output') return outputView();
+  if (state.tab === 'data') return dataView();
+  return inboxView();
+}
+function render() { $('#app').innerHTML = `${navigation()}<main id="app-main" class="main">${page()}</main>`; }
+
+function scoreControl(name, value, labels, max = 5) {
+  return `<div class="score-group"><input type="hidden" name="${name}" value="${value ?? ''}" /> <div class="score-options">${Array.from({length:max}, (_,i)=>i+1).map((n) => `<button type="button" class="score-option ${value === n ? 'active' : ''}" data-score-field="${name}" data-score-value="${n}">${escape(labels ? labels[n-1] : String(n))}</button>`).join('')}</div></div>`;
+}
+function optionList(list, selected, blank = '未設定') { return `<option value="">${blank}</option>${list.map((x,i) => `<option value="${i+1}" ${Number(selected) === i+1 ? 'selected' : ''}>${escape(x)}</option>`).join('')}`; }
+function textField(label, name, value, options = {}) { return `<div class="field ${options.span ? 'span-2' : ''}"><label class="label" for="field-${name}">${escape(label)}</label>${options.area ? `<textarea id="field-${name}" class="textarea" name="${name}" placeholder="${escape(options.placeholder || '')}">${escape(value || '')}</textarea>` : `<input id="field-${name}" class="input" name="${name}" value="${escape(value || '')}" placeholder="${escape(options.placeholder || '')}" />`}${options.help ? `<span class="help">${escape(options.help)}</span>` : ''}</div>`; }
+function selectField(label, name, list, value, options={}) { return `<div class="field ${options.span ? 'span-2' : ''}"><label class="label" for="field-${name}">${escape(label)}</label><select id="field-${name}" class="select" name="${name}">${list.map((x) => `<option value="${escape(x)}" ${x === value ? 'selected' : ''}>${escape(x)}</option>`).join('')}</select>${options.help ? `<span class="help">${escape(options.help)}</span>` : ''}</div>`; }
+
+function editorModal(recordInput = null) {
+  const r = normalizeRecord(recordInput || recordDefaults());
+  const isNew = !recordInput;
+  const modal = `
+    <div class="modal-backdrop" data-action="close-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="editor-title" onclick="event.stopPropagation()">
+      <header class="modal-head"><h2 id="editor-title">${isNew ? '新しい記録' : '記録を編集'}</h2><button class="icon-button" type="button" data-action="close-modal" aria-label="閉じる">×</button></header>
+      <form id="record-form">
+      <div class="modal-body">
+        <div class="form-grid">
+          ${textField('タイトル', 'title', r.title, {span:true, placeholder:'例：関係者12人の進行をまとめた'})}
+          ${selectField('記録の扱い', 'status', STATUS, r.status)}
+          ${selectField('種類', 'type', TYPES, r.type, {help:'「できないこと・制約」は、能力の欠陥ではなく、現時点で前提に置かない条件、必要な支援、代替手段を残すための分類。'})}
+          ${selectField('領域', 'domain', DOMAINS, r.domain)}
+          ${selectField('頻度', 'frequency', FREQUENCIES, r.frequency)}
+          ${textField('一言要約', 'summary', r.summary, {span:true, area:true, placeholder:'何をしたか、何が起きたかを短く'})}
+          ${textField('タグ', 'tags', r.tags.join(' | '), {span:true, help:'複数タグは | で区切る。例：広報 | 企画 | 英語'})}
+        </div>
+        <details class="details" open><summary>1. 事実</summary><div class="details-content"><div class="form-grid">
+          ${textField('何をしたか', 'what', r.what, {span:true, area:true})}
+          ${textField('いつ・どこで', 'where', r.where, {area:true})}
+          ${textField('自分の役割', 'role', r.role, {area:true})}
+          ${textField('関係者', 'stakeholders', r.stakeholders, {area:true})}
+          ${textField('結果・変化', 'result', r.result, {area:true})}
+          ${textField('最終実施日', 'lastDone', r.lastDone, {help:'YYYY-MM-DD または自由記述'})}
+        </div></div></details>
+        <details class="details"><summary>2. 証拠</summary><div class="details-content"><div class="form-grid">
+          ${textField('証拠・具体例', 'evidence', r.evidence, {span:true, area:true, placeholder:'案件名、数値、URL、制作物、第三者の評価'})}
+          ${textField('紐づくID', 'linkedIds', r.linkedIds.join(' | '), {help:'関連する記録IDがあれば | 区切り'})}
+        </div></div></details>
+        <details class="details"><summary>3. 条件・背景</summary><div class="details-content"><div class="form-grid">
+          ${textField('期限', 'deadline', r.deadline, {placeholder:'例：短納期／期限あり'})}
+          ${textField('裁量', 'autonomy', r.autonomy, {placeholder:'例：低い／中程度／高い'})}
+          ${textField('関係者の広さ', 'stakeholderScope', r.stakeholderScope, {placeholder:'例：少人数／複数部署／社外含む'})}
+          ${textField('不確実性', 'uncertainty', r.uncertainty, {placeholder:'例：定型／例外あり／前例なし'})}
+          ${textField('条件タグ', 'conditions', r.conditions.join(' | '), {span:true, help:'例：目的が明確 | 判断期限あり | 現場運用あり'})}
+        </div></div></details>
+        <details class="details"><summary>4. 振り返り</summary><div class="details-content"><div class="form-grid">
+          <div class="field"><label class="label">好き度</label>${scoreControl('enjoyment', r.enjoyment, SCORE_LABELS.enjoyment)}</div>
+          <div class="field"><label class="label">消耗度</label>${scoreControl('fatigue', r.fatigue, SCORE_LABELS.fatigue)}</div>
+          <div class="field span-2"><label class="label">扱える範囲</label><select class="select" name="capability">${optionList(CAPABILITY, r.capability)}</select><span class="help">「得意」は感覚でなく、どこまで自走・応用・仕組み化できるかで残す。</span></div>
+          ${Object.entries(AXIS_LABELS).map(([key,label]) => `<div class="field"><label class="label">${escape(label)}を扱う度合い</label><select class="select" name="${key}"><option value="">未整理</option><option value="0" ${r[key] === 0 ? 'selected' : ''}>0：扱わない</option><option value="1" ${r[key] === 1 ? 'selected' : ''}>1：少し扱う</option><option value="2" ${r[key] === 2 ? 'selected' : ''}>2：中心的に扱う</option><option value="3" ${r[key] === 3 ? 'selected' : ''}>3：強く扱う</option></select></div>`).join('')}
+          ${textField('振り返りメモ', 'reflection', r.reflection, {span:true, area:true})}
+          ${textField('反証・うまくいかなかった条件', 'counterEvidence', r.counterEvidence, {span:true, area:true})}
+          ${textField('次に試すこと・代替策', 'nextExperiment', r.nextExperiment, {span:true, area:true, help:'改善だけでなく、避ける・頼る・仕組みで補う選択肢も書く。'})}
+        </div></div></details>
+        <details class="details"><summary>5. 提示用メモ</summary><div class="details-content"><div class="form-grid">
+          ${selectField('面接での利用', 'interviewUse', INTERVIEW, r.interviewUse)}
+          ${textField('応募先・用途タグ', 'useTags', r.useTags.join(' | '), {help:'例：PARK | PM | ブランディング'})}
+          ${textField('一言で言うと', 'oneLiner', r.oneLiner, {span:true, area:true})}
+          ${textField('再現できる条件', 'reproducibleConditions', r.reproducibleConditions, {span:true, area:true})}
+          ${textField('他社でも通じる言い換え', 'translation', r.translation, {span:true, area:true})}
+        </div></div></details>
+        <input type="hidden" name="id" value="${escape(r.id)}" /><input type="hidden" name="createdAt" value="${escape(r.createdAt)}" /><input type="hidden" name="seedId" value="${escape(r.seedId || '')}" />
+      </div>
+      <footer class="modal-foot"><div>${!isNew ? button('削除', 'delete-record', {variant:'danger', id:r.id}) : '<span class="muted">保存後に証拠や条件を足せる。</span>'}</div><div style="display:flex;gap:8px">${button('閉じる', 'close-modal', {variant:'secondary'})}<button class="button primary" type="submit">保存する</button></div></footer>
+      </form>
+    </section></div>`;
+  $('#modal-root').innerHTML = modal;
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => $('#field-title')?.focus(), 20);
+}
+function closeModal() { $('#modal-root').innerHTML = ''; document.body.style.overflow = ''; }
+
+function formToRecord(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  ['tags', 'linkedIds', 'conditions', 'useTags'].forEach((key) => data[key] = toArray(data[key]));
+  ['enjoyment', 'fatigue', 'capability'].forEach((key) => data[key] = toInt(data[key], 5));
+  Object.keys(AXIS_LABELS).forEach((key) => data[key] = toInt(data[key], 3));
+  data.updatedAt = now();
+  return normalizeRecord(data);
+}
+
+function downloadText(filename, text, type = 'text/tab-separated-values;charset=utf-8') {
+  const blob = new Blob([`\uFEFF${text}`], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 700);
+}
+function tsvEscape(value) {
+  const text = Array.isArray(value) ? value.join(' | ') : String(value ?? '');
+  return /[\t\n\r"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+function recordsToTSV(records) {
+  const header = TSV_COLUMNS.map(([label]) => label);
+  const lines = [header.map(tsvEscape).join('\t')];
+  records.forEach((record) => lines.push(TSV_COLUMNS.map(([,key]) => tsvEscape(record[key])).join('\t')));
+  return lines.join('\n');
+}
+function templateTSV() { return TSV_COLUMNS.map(([label]) => label).join('\t') + '\n'; }
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); toast('クリップボードにコピーした。'); }
+  catch { toast('コピーできなかった。ブラウザの権限を確認して。', 'error'); }
+}
+
+function parseTSV(text) {
+  const rows = []; let row = []; let field = ''; let quoted = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]; const next = text[i+1];
+    if (char === '"') { if (quoted && next === '"') { field += '"'; i += 1; } else quoted = !quoted; }
+    else if (char === '\t' && !quoted) { row.push(field); field = ''; }
+    else if ((char === '\n' || char === '\r') && !quoted) {
+      if (char === '\r' && next === '\n') i += 1;
+      row.push(field); field = '';
+      if (row.some((value) => value !== '')) rows.push(row);
+      row = [];
+    } else field += char;
+  }
+  if (field || row.length) { row.push(field); if (row.some((value) => value !== '')) rows.push(row); }
+  if (!rows.length) return { headers: [], rows: [] };
+  const headers = rows[0].map((x) => x.trim());
+  return { headers, rows: rows.slice(1).map((values, index) => ({ line: index + 2, values })) };
+}
+function mapImportRow(headers, values) {
+  const patch = {};
+  headers.forEach((header, idx) => {
+    const key = HEADER_ALIASES.get(header.trim());
+    if (!key) return;
+    const value = values[idx] ?? '';
+    if (key === 'tags' || key === 'linkedIds' || key === 'conditions' || key === 'useTags') patch[key] = value === '' ? '' : value === CLEAR ? CLEAR : toArray(value);
+    else if (['enjoyment','fatigue','capability'].includes(key)) patch[key] = value === '' ? '' : value === CLEAR ? CLEAR : toInt(value, 5);
+    else if (Object.keys(AXIS_LABELS).includes(key)) patch[key] = value === '' ? '' : value === CLEAR ? CLEAR : toInt(value, 3);
+    else patch[key] = value;
+  });
+  return patch;
+}
+function createImportPreview(text, mode) {
+  const parsed = parseTSV(text);
+  const mapped = parsed.headers.map((h) => ({ raw:h, key:HEADER_ALIASES.get(h.trim()) || '' }));
+  const recognized = mapped.filter((x) => x.key);
+  const existing = new Map(state.records.map((r) => [r.id, r]));
+  const preview = { mode, modeLabel: { add:'追加',partial:'部分更新',restore:'全件復元',replace:'全置換' }[mode], headers: parsed.headers, mapped, rows: [], errors: [], add:0, update:0, skip:0, parsedRows: [] };
+  if (!recognized.length) { preview.errors.push('見出しを認識できなかった。テンプレートを使うか、タイトル列を含めて貼り付ける。'); return preview; }
+  parsed.rows.forEach(({line, values}) => {
+    const patch = mapImportRow(parsed.headers, values);
+    const id = patch.id;
+    const existingRecord = id ? existing.get(id) : null;
+    const title = patch.title || existingRecord?.title || '';
+    let kind = 'skip'; let label='スキップ'; let note='空行または更新対象がない';
+    if (mode === 'partial') {
+      if (!id || !existingRecord) { kind='error'; label='エラー'; note='部分更新には既存の __id が必要'; }
+      else {
+        const changedKeys = Object.keys(patch).filter((key) => key !== 'id' && patch[key] !== '');
+        if (changedKeys.length) { kind='update'; label='更新'; note=`${changedKeys.join('、')} を更新`; }
+        else { kind='skip'; label='スキップ'; note='空欄は変更しない'; }
+      }
+    } else if (mode === 'add') {
+      if (!patch.title) { kind='error'; label='エラー'; note='タイトルが空欄'; }
+      else if (id && existingRecord) { kind='skip'; label='スキップ'; note='同じ __id が既にある（既存データは触らない）'; }
+      else { kind='new'; label='追加'; note='新しい記録として追加'; }
+    } else {
+      if (!patch.title) { kind='error'; label='エラー'; note='タイトルが空欄'; }
+      else if (id && existingRecord) { kind='update'; label='更新'; note='全件データとして反映'; }
+      else { kind='new'; label='追加'; note='全件データに追加'; }
+    }
+    const item = { line, patch, title, kind, label, note };
+    preview.rows.push(item); preview.parsedRows.push(item);
+    if (kind === 'new') preview.add += 1;
+    else if (kind === 'update') preview.update += 1;
+    else if (kind === 'skip') preview.skip += 1;
+    else preview.errors.push(`行${line}：${note}`);
+  });
+  return preview;
+}
+async function applyImport(preview) {
+  const valid = preview.rows.filter((x) => x.kind === 'new' || x.kind === 'update');
+  if (!valid.length) { toast('反映できる行がない。', 'warn'); return; }
+  if ((preview.mode === 'replace' || preview.mode === 'restore') && !confirm(`現在の${state.records.length}件を、取り込みデータで置き換える。自動バックアップは作るが、実行してよい？`)) return;
+  await makeSnapshot(`TSV${preview.modeLabel}前`);
+  const current = new Map(state.records.map((r) => [r.id, r]));
+  let next;
+  if (preview.mode === 'replace' || preview.mode === 'restore') {
+    next = valid.map((item) => normalizeRecord({ ...item.patch, id: item.patch.id || uid(), createdAt: current.get(item.patch.id)?.createdAt || now(), updatedAt: now() }));
+  } else if (preview.mode === 'partial') {
+    next = state.records.map((old) => {
+      const item = valid.find((x) => x.patch.id === old.id);
+      if (!item) return old;
+      const patch = {};
+      Object.entries(item.patch).forEach(([key,value]) => { if (key !== 'id' && value !== '') patch[key] = value === CLEAR ? (Array.isArray(old[key]) ? [] : '') : value; });
+      return normalizeRecord({ ...old, ...patch, updatedAt: now() });
+    });
+  } else {
+    next = [...state.records, ...valid.map((item) => normalizeRecord({ ...item.patch, id: item.patch.id || uid(), createdAt: now(), updatedAt: now() }))];
+  }
+  await replaceAllRecords(next);
+  state.importPreview = null;
+  await refreshRecords();
+  toast(`${preview.modeLabel}を反映した。追加 ${preview.add}件、更新 ${preview.update}件。`);
+}
+
+async function seedSample() {
+  const existing = new Set(state.records.map((r) => r.seedId || r.id));
+  const candidates = SAMPLE_RECORDS.filter((r) => !existing.has(r.seedId || r.id)).map((r) => normalizeRecord({ ...r, id: r.id || uid(), seedId: r.seedId || r.id, createdAt: now(), updatedAt: now(), isSample: true }));
+  if (!candidates.length) { toast('初期台帳はすでに取り込み済み。', 'warn'); return; }
+  if (!confirm(`初期台帳 ${candidates.length}件を追加する。業務上の機微な情報も含むため、公開GitHubにはそのまま置かない。`)) return;
+  await makeSnapshot('初期台帳追加前');
+  await Promise.all(candidates.map(putRecord));
+  await refreshRecords();
+  toast(`初期台帳 ${candidates.length}件を追加した。`);
+}
+
+function setFilters(partial) { state.filters = { ...state.filters, ...partial }; render(); }
+function showSubset(rows, label) { state.tab = 'ledger'; state.filters = { search:'', status:'', type:'', domain:'', interviewUse:'', sort:'updated' }; state._subset = { rows: rows.map((r)=>r.id), label }; render(); }
+
+function handleAction(action, target) {
+  if (action === 'start-skill-quick') return startSkillSession(quickSkillQuestionIds(), { name: '3分だけ答える｜6問' });
+  if (action === 'start-skill-all') return startSkillSession(SKILL_QUESTIONS.map((question) => question.id), { name: `全 ${SKILL_QUESTION_COUNT}問` });
+  if (action === 'start-skill-category') { const category = SKILL_CATEGORIES.find((item) => item.id === target.dataset.categoryId); return startSkillSession(categoryQuestions(target.dataset.categoryId).map((question) => question.id), { name: category?.label || '分野別チェック' }); }
+  if (action === 'start-skill-work-path') { const path = WORK_PATHS.find((item) => item.id === target.dataset.pathId); return startSkillSession(questionIdsForWorkPath(target.dataset.pathId), { name: path?.label || '仕事から始める' }); }
+  if (action === 'resume-skill') { persistSkillSession(); render(); return; }
+  if (action === 'answer-skill') return setSkillStatus(target.dataset.questionId, target.dataset.status);
+  if (action === 'set-skill-tempo') { state.skill.tempo = target.dataset.tempo === 'fast' ? 'fast' : 'stay'; persistSkillSession(); render(); return; }
+  if (action === 'toggle-guided-support') return toggleGuidedSupport(target.dataset.questionId, target.dataset.value);
+  if (action === 'toggle-skill-pin') return toggleSkillPin(target.dataset.questionId, target.dataset.value);
+  if (action === 'toggle-skill-memo') { state.skill.memoOpenQuestionId = state.skill.memoOpenQuestionId === target.dataset.questionId ? '' : target.dataset.questionId; render(); return; }
+  if (action === 'open-recent-skill-memo') return skillMemoModal(state.skill.lastAnswered?.questionId, '直前の回答にメモを添える');
+  if (action === 'undo-recent-skill-answer') return clearSkillStatusOnly(state.skill.lastAnswered?.questionId);
+  if (action === 'clear-skill-answer') return clearSkillAnswer(target.dataset.questionId);
+  if (action === 'skill-prev') { state.skill.index = Math.max(0, state.skill.index - 1); persistSkillSession(); render(); window.scrollTo(0, 0); return; }
+  if (action === 'skill-next') { if (state.skill.index >= state.skill.sessionIds.length - 1) return endSkillSession(); state.skill.index += 1; state.skill.memoOpenQuestionId = ''; persistSkillSession(); render(); window.scrollTo(0, 0); return; }
+  if (action === 'finish-skill-session') return endSkillSession();
+  if (action === 'show-skill-output') return skillOutputModal();
+  if (action === 'set-skill-output-format') { state.skill.outputFormat = target.dataset.format === 'text' ? 'text' : 'markdown'; persistSkillSession(); if ($('#modal-root').innerHTML) skillOutputModal(); else render(); return; }
+  if (action === 'set-skill-output-filter') { state.skill.outputFilter = Object.hasOwn(OUTPUT_FILTERS, target.dataset.filter) ? target.dataset.filter : 'all'; persistSkillSession(); if ($('#modal-root').innerHTML) skillOutputModal(); else render(); return; }
+  if (action === 'copy-skill-output') return copyText($('#skill-output-modal-text')?.value || $('#skill-output-text')?.value || skillOutput());
+  if (action === 'download-skill-output') { const format = state.skill.outputFormat; return downloadText(`selfanalysis-skill-check-${new Date().toISOString().slice(0,10)}.${format === 'markdown' ? 'md' : 'txt'}`, skillOutput(format), format === 'markdown' ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'); }
+  if (action === 'new-record') return editorModal();
+  if (action === 'open-record') return editorModal(state.records.find((r) => r.id === target.dataset.id));
+  if (action === 'close-modal') return closeModal();
+  if (action === 'delete-record') return deleteCurrent(target.dataset.id);
+  if (action === 'go-ledger') { state.tab = 'ledger'; render(); return; }
+  if (action === 'clear-filters') { state.filters = { search:'',status:'',type:'',domain:'',interviewUse:'',sort:'updated' }; render(); return; }
+  if (action === 'filter-evidence-missing') return showSubset(state.records.filter((r)=>!r.evidence && !r.result), '証拠待ち');
+  if (action === 'filter-condition-missing') return showSubset(state.records.filter((r)=>!r.conditions.length && !r.deadline && !r.autonomy && !r.stakeholderScope), '条件未整理');
+  if (action === 'filter-reflection-missing') return showSubset(state.records.filter((r)=>!r.reflection && !r.counterEvidence && !r.nextExperiment), '振り返り待ち');
+  if (action === 'filter-interview-thin') return showSubset(state.records.filter((r)=>r.interviewUse !== 'まだ使わない' && scoreEvidence(r)<2), '面接候補だが薄い');
+  if (action === 'filter-constraints') return showSubset(state.records.filter((r)=>r.type === 'できないこと・制約'), 'できないこと・制約');
+  if (action === 'seed-sample') return seedSample();
+  if (action === 'export-all') return downloadText(`selfanalysis-${APP_VERSION}-backup-${new Date().toISOString().slice(0,10)}.tsv`, recordsToTSV(state.records));
+  if (action === 'export-filtered') return downloadText(`selfanalysis-${APP_VERSION}-filtered-${new Date().toISOString().slice(0,10)}.tsv`, recordsToTSV(filteredRecords()));
+  if (action === 'export-selected') return downloadText(`selfanalysis-${APP_VERSION}-selected-${new Date().toISOString().slice(0,10)}.tsv`, recordsToTSV(state.records.filter((r)=>state.selected.has(r.id))));
+  if (action === 'copy-template') return copyText(templateTSV());
+  if (action === 'choose-tsv-file') return $('#tsv-file')?.click();
+  if (action === 'parse-import') {
+    const text = $('#import-text')?.value || ''; const mode = $('#import-mode')?.value || 'add';
+    if (!text.trim()) return toast('TSVを貼り付けてから差分を確認して。', 'warn');
+    state.importPreview = createImportPreview(text, mode); render(); return;
+  }
+  if (action === 'clear-import-preview') { state.importPreview = null; render(); return; }
+  if (action === 'apply-import') return applyImport(state.importPreview);
+  if (action === 'copy-output') return copyText($('#output-text')?.value || '');
+}
+async function deleteCurrent(id) {
+  const record = state.records.find((r)=>r.id===id);
+  if (!record || !confirm(`「${record.title}」を削除する？ この操作は直前のスナップショットからしか戻せない。`)) return;
+  await makeSnapshot('記録削除前'); await deleteRecord(id); closeModal(); await refreshRecords(); toast('削除した。');
+}
+
+function bindEvents() {
+  document.addEventListener('click', (event) => {
+    const tab = event.target.closest('[data-tab]');
+    if (tab) { state.tab = tab.dataset.tab; state._subset = null; render(); return; }
+    const score = event.target.closest('[data-score-field]');
+    if (score) {
+      const input = $(`input[name="${score.dataset.scoreField}"]`, $('#modal-root'));
+      if (input) { input.value = score.dataset.scoreValue; $$(`[data-score-field="${score.dataset.scoreField}"]`, $('#modal-root')).forEach((el)=>el.classList.toggle('active', el === score)); }
       return;
     }
-    setByPath(target, path, value);
+    const action = event.target.closest('[data-action]');
+    if (action) handleAction(action.dataset.action, action);
   });
-  if (input.__id && input.__id !== '__CLEAR__') target.id = input.__id;
-  target.tags = normalizeTags(target.tags);
-  target.conditions.attributes = normalizeTags(target.conditions.attributes);
-  target.presentation.companyTags = normalizeTags(target.presentation.companyTags);
-  target.linkedRecordIds = normalizeTags(target.linkedRecordIds);
-  target.updatedAt = now();
-  return normalizeRecord(target);
+  document.addEventListener('submit', async (event) => {
+    if (event.target.id === 'quick-capture') {
+      event.preventDefault(); const form = event.target; const fd = new FormData(form); const record = normalizeRecord({ ...recordDefaults(), title: fd.get('title'), domain: fd.get('domain'), status:'事実', type:'実例', summary:'', createdAt:now(), updatedAt:now() });
+      await putRecord(record); form.reset(); await refreshRecords(); toast('事実メモとして保存した。'); return;
+    }
+    if (event.target.id === 'record-form') {
+      event.preventDefault(); const record = formToRecord(event.target); if (!record.title.trim()) { toast('タイトルを入れて。', 'warn'); return; }
+      await putRecord(record); closeModal(); await refreshRecords(); toast('保存した。'); return;
+    }
+  });
+  document.addEventListener('change', async (event) => {
+    const filter = event.target.closest('[data-filter]');
+    if (filter) { setFilters({ [filter.dataset.filter]: filter.value }); return; }
+    const selected = event.target.closest('[data-select-record]');
+    if (selected) { if (selected.checked) state.selected.add(selected.dataset.selectRecord); else state.selected.delete(selected.dataset.selectRecord); render(); return; }
+    if (event.target.id === 'tsv-file') {
+      const file = event.target.files?.[0]; if (!file) return; const text = await file.text(); const box = $('#import-text'); if (box) box.value = text; toast(`${file.name} を読み込んだ。差分を確認して。`); return;
+    }
+  });
+  document.addEventListener('input', (event) => {
+    const skillNote = event.target.closest('[data-skill-note]');
+    if (skillNote) {
+      const questionId = skillNote.dataset.skillNote;
+      const note = skillNote.value;
+      const current = skillAnswer(questionId);
+      state.skillAnswers.set(questionId, { ...current, questionId, note, updatedAt: now() });
+      window.__skillNoteTimers = window.__skillNoteTimers || {};
+      clearTimeout(window.__skillNoteTimers[questionId]);
+      window.__skillNoteTimers[questionId] = setTimeout(() => { putSkillAnswer(state.skillAnswers.get(questionId)).catch(console.error); }, 360);
+      return;
+    }
+    const filter = event.target.closest('[data-filter="search"]');
+    if (filter) { state.filters.search = filter.value; clearTimeout(window.__searchTimer); window.__searchTimer = setTimeout(render, 220); }
+  });
+  document.addEventListener('click', (event) => {
+    const tab = event.target.closest('[data-output-kind]');
+    if (tab) {
+      $$('.tab').forEach((x)=>x.classList.toggle('active', x===tab));
+      const records = state.records.filter((r)=>state.selected.has(r.id)); const out = $('#output-text'); if (out) out.value = buildOutput(records, tab.dataset.outputKind);
+    }
+  });
+  window.addEventListener('keydown', async (event) => {
+    if (event.key === 'Escape' && $('#modal-root').innerHTML) closeModal();
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase()==='s' && $('#record-form')) { event.preventDefault(); $('#record-form').requestSubmit(); }
+  });
 }
 
-// Event handling --------------------------------------------------------------
-function bindEvents() {
-  root.onclick = handleClick;
-  root.oninput = handleInput;
-  root.onchange = handleChange;
-  root.onsubmit = handleSubmit;
-}
-async function handleClick(event) {
-  const target = event.target.closest('[data-action], [data-view], [data-suggestion], [data-scale]');
-  if (!target) return;
-  const view = target.dataset.view;
-  if (view) { event.preventDefault(); navigate(view); return; }
-  if (target.dataset.suggestion !== undefined) {
-    const input = document.getElementById('quick-title');
-    if (input) { input.value = target.dataset.suggestion; input.focus(); }
-    return;
-  }
-  if (target.dataset.scale && state.draft) {
-    setByPath(state.draft, target.dataset.scale, Number(target.dataset.value));
-    render();
-    return;
-  }
-  const action = target.dataset.action;
-  if (!action) return;
-  if (action === 'new-record') return createNewRecord();
-  if (action === 'open-record') return openRecord(target.dataset.recordId);
-  if (action === 'duplicate-record') return duplicateRecord(target.dataset.recordId);
-  if (action === 'back-ledger') { state.activeRecordId = null; state.draft = null; navigate('ledger'); return; }
-  if (action === 'save-record') return saveDraft();
-  if (action === 'delete-record') return deleteActiveRecord();
-  if (action === 'toggle-section') { toggleSection(target.dataset.section); return; }
-  if (action === 'export-all') return downloadTSV(state.records, 'evidence-ledger-all.tsv');
-  if (action === 'export-filtered') return downloadTSV(getFilteredRecords(), 'evidence-ledger-filtered.tsv');
-  if (action === 'copy-template') return copyToClipboard(buildTemplateTSV(), 'TSVテンプレートをコピーした');
-  if (action === 'load-template') { state.importText = buildTemplateTSV(); state.importPreview = null; render(); toast('テンプレートを入力欄に入れた'); return; }
-  if (action === 'set-import-mode') { state.importMode = target.dataset.mode; state.importPreview = null; render(); return; }
-  if (action === 'analyze-import') return analyzeCurrentImport();
-  if (action === 'apply-import') return beginApplyImport();
-  if (action === 'undo-import') return undoImport();
-  if (action === 'confirm-replace') return confirmReplace();
-  if (action === 'close-modal') { state.modal = null; render(); return; }
-  if (action === 'sample') return insertSampleData();
-  if (action === 'copy-output') return copyToClipboard(generateOutput(getSelectedOutputRecords(), state.outputFormat), '出力結果をコピーした');
-  if (action === 'export-output-tsv') return downloadTSV(getSelectedOutputRecords(), 'evidence-ledger-selection.tsv');
-  if (action === 'show-condition') return filterByCondition(target.dataset.conditionLabel);
-}
-function handleInput(event) {
-  const input = event.target;
-  if (input.id === 'import-text') { state.importText = input.value; state.importPreview = null; return; }
-  if (input.dataset.filter) { state.filters[input.dataset.filter] = input.value; if (input.dataset.filter === 'query') debounceRenderLedger(); return; }
-  if (input.dataset.field && state.draft) { setByPath(state.draft, input.dataset.field, input.value); return; }
-}
-let ledgerRenderTimer;
-function debounceRenderLedger() {
-  clearTimeout(ledgerRenderTimer);
-  ledgerRenderTimer = setTimeout(() => { if (state.view === 'ledger') render(); }, 180);
-}
-function handleChange(event) {
-  const input = event.target;
-  if (input.dataset.filter) { state.filters[input.dataset.filter] = input.value; render(); return; }
-  if (input.dataset.field && state.draft) { setByPath(state.draft, input.dataset.field, input.value); return; }
-  if (input.dataset.linkId && state.draft) {
-    const id = input.dataset.linkId;
-    const set = new Set(state.draft.linkedRecordIds || []);
-    input.checked ? set.add(id) : set.delete(id);
-    state.draft.linkedRecordIds = [...set];
-    return;
-  }
-  if (input.dataset.condition && state.draft) {
-    const value = input.dataset.condition;
-    const set = new Set(state.draft.conditions.attributes || []);
-    input.checked ? set.add(value) : set.delete(value);
-    state.draft.conditions.attributes = [...set];
-    return;
-  }
-  if (input.dataset.outputId) {
-    input.checked ? state.outputSelection.add(input.dataset.outputId) : state.outputSelection.delete(input.dataset.outputId);
-    if (state.view === 'output') render();
-    return;
-  }
-  if ('outputFormat' in input.dataset) { state.outputFormat = input.value; render(); return; }
-  if (input.id === 'tsv-file') {
-    const file = input.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => { state.importText = String(reader.result || ''); state.importPreview = null; render(); toast('TSVファイルを読み込んだ'); };
-    reader.readAsText(file, 'utf-8');
-  }
-}
-function handleSubmit(event) {
-  if (event.target.id === 'quick-entry-form') {
-    event.preventDefault();
-    const form = new FormData(event.target);
-    const title = String(form.get('title') || '').trim();
-    if (!title) return;
-    const record = defaultRecord({ title, type: String(form.get('type')), domain: String(form.get('domain')), summary: title });
-    state.draft = record;
-    state.activeRecordId = record.id;
-    state.view = 'detail';
-    render();
-    toast('下書きを作った。必要なら詳細を足して保存。');
-  }
-}
-
-function navigate(view) {
-  if (view === 'data' && window.innerWidth < 720) {
-    // mobile "その他" is intentionally data first; data includes safe import/export.
-  }
-  state.view = view;
-  if (view !== 'detail') { state.activeRecordId = null; state.draft = null; }
-  render();
-}
-function createNewRecord() {
-  state.draft = defaultRecord();
-  state.activeRecordId = state.draft.id;
-  state.view = 'detail';
-  state.collapsedSections = new Set(['evidence','conditions','reflection','presentation']);
-  render();
-}
-function openRecord(id) {
-  const record = state.records.find(r => r.id === id);
-  if (!record) return toast('記録が見つからない');
-  state.draft = clone(record);
-  state.activeRecordId = id;
-  state.view = 'detail';
-  state.collapsedSections = new Set();
-  render();
-}
-async function duplicateRecord(id) {
-  const record = state.records.find(r => r.id === id);
-  if (!record) return;
-  const duplicated = clone(record);
-  duplicated.id = uid();
-  duplicated.title = `${record.title}（複製）`;
-  duplicated.createdAt = now();
-  duplicated.updatedAt = now();
-  state.draft = duplicated;
-  state.activeRecordId = duplicated.id;
-  state.view = 'detail';
-  render();
-  toast('複製を作った。必要なところだけ直して保存。');
-}
-function toggleSection(key) {
-  state.collapsedSections.has(key) ? state.collapsedSections.delete(key) : state.collapsedSections.add(key);
-  render();
-}
-async function saveDraft() {
-  if (!state.draft) return;
-  const title = String(state.draft.title || '').trim();
-  if (!title) { toast('タイトルを入れてから保存して。'); document.getElementById('field-title')?.focus(); return; }
-  state.draft.title = title;
-  state.draft.tags = normalizeTags(state.draft.tagsText ?? state.draft.tags);
-  delete state.draft.tagsText;
-  state.draft.presentation.companyTags = normalizeTags(state.draft.presentation.companyTagsText ?? state.draft.presentation.companyTags);
-  delete state.draft.presentation.companyTagsText;
-  state.draft.updatedAt = now();
-  const record = normalizeRecord(state.draft);
-  await dbPut(RECORD_STORE, record);
-  const index = state.records.findIndex(r => r.id === record.id);
-  if (index >= 0) state.records[index] = record; else state.records.unshift(record);
-  state.draft = clone(record);
-  state.activeRecordId = record.id;
-  render();
-  toast('保存した');
-}
-async function deleteActiveRecord() {
-  if (!state.activeRecordId) return;
-  const record = state.records.find(r => r.id === state.activeRecordId);
-  if (!record) return;
-  if (!confirm(`「${record.title}」を削除する？\nこの操作は通常の保存履歴には残らない。`)) return;
-  await dbDelete(RECORD_STORE, record.id);
-  state.records = state.records.filter(r => r.id !== record.id);
-  state.activeRecordId = null;
-  state.draft = null;
-  state.view = 'ledger';
-  render();
-  toast('削除した');
-}
-async function insertSampleData() {
-  const existingSeeds = new Set(state.records.map(record => record.seedKey).filter(Boolean));
-  const records = sampleRecords().filter(record => !existingSeeds.has(record.seedKey));
-  if (!records.length) { toast('初期台帳はすべて追加済み。'); return; }
-  const message = `初期台帳 ${records.length}件を追加する？
-今の記録は消さない。事実・自己観察・仮説が混ざるため、あとで根拠を確認して育てる。`;
-  if (!confirm(message)) return;
-  for (const record of records) {
-    record.id = uid();
-    record.createdAt = now();
-    record.updatedAt = now();
-    await dbPut(RECORD_STORE, record);
-  }
-  state.records = [...records, ...state.records].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-  render();
-  toast(`初期台帳を ${records.length}件追加した。まずは『整理』で証拠と仮説を見直す。`);
-}
-function filterByCondition(condition) {
-  state.filters = { ...state.filters, query: condition, type: 'すべて', domain: 'すべて', evidence: 'すべて', status: 'すべて', order: '最近更新' };
-  state.view = 'ledger';
-  render();
-}
-function getSelectedOutputRecords() {
-  return state.records.filter(record => state.outputSelection.has(record.id));
-}
-
-// Import actions --------------------------------------------------------------
-function analyzeCurrentImport() {
-  const text = state.importText.trim();
-  if (!text) { toast('TSVを貼り付けてから読み取る。'); return; }
-  const analyzed = analyzeImport(text, state.importMode);
-  if (analyzed.error) { toast(analyzed.error); return; }
-  state.importPreview = analyzed;
-  state.importHeaders = analyzed.rawHeaders;
-  render();
-  toast('差分を作った。反映前に内容を確認して。');
-}
-function beginApplyImport() {
-  const preview = state.importPreview;
-  if (!preview) return;
-  if (preview.counts.error) { toast('エラー行を直してから反映する。'); return; }
-  if (state.importMode === 'replace' || state.importMode === 'restore') {
-    const next = preview.rows.filter(row => row.record && row.status !== 'error').map(row => row.record);
-    const nextIds = new Set(next.map(r => r.id));
-    const deleted = state.records.filter(r => !nextIds.has(r.id)).length;
-    state.modal = {
-      type: 'confirm-replace',
-      title: state.importMode === 'replace' ? '全置換を実行する' : '全件復元を実行する',
-      description: state.importMode === 'replace' ? 'TSVにない記録は削除される。反映前の台帳は自動バックアップする。' : '現在の台帳を、貼り付けたTSVの状態へ戻す。反映前の台帳は自動バックアップする。',
-      current: state.records.length, next: next.length, deleted,
-      confirmText: `${state.records.length}件を${state.importMode === 'replace' ? '置き換える' : '復元する'}`,
-    };
-    render();
-    return;
-  }
-  applyImport();
-}
-async function confirmReplace() {
-  const input = document.getElementById('confirm-replace-input');
-  const expected = state.modal?.confirmText;
-  if (!input || input.value.trim() !== expected) { toast(`確認文「${expected}」を入力して。`); return; }
-  state.modal = null;
-  await applyImport();
-}
-async function applyImport() {
-  const preview = state.importPreview;
-  if (!preview) return;
-  const before = clone(state.records);
-  await saveSnapshot(`TSV ${state.importMode}`, before);
-  let next = clone(state.records);
-  const updates = preview.rows.filter(row => row.record && !['error','skip'].includes(row.status));
-  if (state.importMode === 'append') {
-    updates.forEach(row => { next.push(row.record); });
-  } else if (state.importMode === 'partial') {
-    updates.forEach(row => { const i = next.findIndex(record => record.id === row.record.id); if (i >= 0) next[i] = row.record; });
-  } else {
-    next = updates.map(row => row.record);
-  }
-  // guard duplicate ids in replace / restore
-  const ids = new Set();
-  for (const record of next) {
-    if (ids.has(record.id)) { toast('同じIDが複数あるため反映できない。'); return; }
-    ids.add(record.id);
-  }
-  next = next.map(normalizeRecord);
-  await dbReplaceAllRecords(next);
-  state.records = next;
-  state.importPreview = null;
-  state.importText = '';
-  render();
-  const counts = preview.counts;
-  toast(`反映した：追加 ${counts.new}件／更新 ${counts.update}件`);
-}
-async function undoImport() {
-  const snapshot = await getLatestSnapshot();
-  if (!snapshot) { toast('戻せる取り込み履歴がない。'); return; }
-  if (!confirm(`${localDateTime(snapshot.createdAt)} の「${snapshot.action}」前に戻す？\n現在の台帳はこの操作で置き換わる。`)) return;
-  await saveSnapshot('Undo before restore', clone(state.records));
-  const records = snapshot.before.map(normalizeRecord);
-  await dbReplaceAllRecords(records);
-  state.records = records;
-  state.importPreview = null;
-  render();
-  toast('取り込み前の状態に戻した');
-}
-
-// Clipboard / download --------------------------------------------------------
-async function copyToClipboard(text, message) {
+async function boot() {
   try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const textarea = document.createElement('textarea');
-    textarea.value = text; document.body.appendChild(textarea); textarea.select(); document.execCommand('copy'); textarea.remove();
-  }
-  toast(message);
-}
-function downloadTSV(records, filename) {
-  const blob = new Blob([`\uFEFF${buildTSV(records)}`], { type: 'text/tab-separated-values;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url; anchor.download = filename; anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast(`${records.length}件をTSVで保存した`);
-}
-function toast(message) {
-  const node = document.createElement('div');
-  node.className = 'toast'; node.textContent = message;
-  toastRegion.appendChild(node);
-  setTimeout(() => node.remove(), 3600);
-}
-
-// App startup ----------------------------------------------------------------
-async function init() {
-  try {
-    const records = await dbGetAll(RECORD_STORE);
-    state.records = records.map(normalizeRecord).sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    state.db = await openDB();
+    state.records = (await getAllRecords()).map(normalizeRecord).sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));
+    state.skillAnswers = new Map((await getAllSkillAnswers()).map((answer) => [answer.questionId, normalizeSkillAnswer(answer)]));
+    restoreSkillSession();
+    bindEvents(); render();
   } catch (error) {
     console.error(error);
-    toast('ブラウザ保存を初期化できなかった。プライベートブラウズ設定を確認して。');
+    $('#app').innerHTML = `<main class="main"><div class="notice danger"><strong>保存領域を開けなかった。</strong><br>ブラウザのプライベートモードやストレージ設定を確認して、ページを再読み込みして。</div></main>`;
   }
-  render();
 }
-
-init();
+boot();
